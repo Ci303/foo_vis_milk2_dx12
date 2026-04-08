@@ -3374,13 +3374,17 @@ void CPlugin::MilkDropRenderFrame(int redraw)
 
     if (!redraw)
     {
-        GetWinampSongTitle(GetWinampWindow(), m_szSongTitle, ARRAYSIZE(m_szSongTitle));
-        if (wcscmp(m_szSongTitle, m_szSongTitlePrev) != 0)
+#ifndef _FOOBAR
+        wchar_t currentSongTitle[ARRAYSIZE(m_szSongTitle)] = {};
+        GetWinampSongTitle(GetWinampWindow(), currentSongTitle, ARRAYSIZE(currentSongTitle));
+        if (currentSongTitle[0] != L'\0' && wcscmp(currentSongTitle, m_szSongTitlePrev) != 0)
         {
-            wcscpy_s(m_szSongTitlePrev, m_szSongTitle);
+            wcscpy_s(m_szSongTitle, currentSongTitle);
+            wcscpy_s(m_szSongTitlePrev, currentSongTitle);
             if (m_bSongTitleAnims)
                 LaunchSongTitleAnim();
         }
+#endif
     }
 
     // 2. Clear the background.

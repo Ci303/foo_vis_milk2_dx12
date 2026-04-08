@@ -1341,6 +1341,9 @@ void milk2_ui_element::UpdateTrack()
     {
         m_state = "Stopped.";
     }
+
+    const auto title = pfc::wideFromUTF8(m_state.c_str());
+    wcscpy_s(g_plugin.m_szSongTitle, title.c_str());
 }
 
 void milk2_ui_element::UpdateTrack(metadb_handle_ptr p_track)
@@ -1349,6 +1352,16 @@ void milk2_ui_element::UpdateTrack(metadb_handle_ptr p_track)
 
     if (!p_track.is_valid())
         return;
+
+    if (s_config.settings.m_bSongTitleAnims &&
+        g_plugin.m_szSongTitle[0] != L'\0' &&
+        wcscmp(g_plugin.m_szSongTitle, L"Stopped.") != 0 &&
+        wcscmp(g_plugin.m_szSongTitle, L"Opening...") != 0 &&
+        wcscmp(g_plugin.m_szSongTitle, g_plugin.m_szSongTitlePrev) != 0)
+    {
+        wcscpy_s(g_plugin.m_szSongTitlePrev, g_plugin.m_szSongTitle);
+        LaunchSongTitle();
+    }
 
     // Load the album art.
     if (wcsnlen_s(s_config.settings.m_szArtworkFormat, 256) != 0)
