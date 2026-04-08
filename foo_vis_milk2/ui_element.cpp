@@ -258,7 +258,7 @@ void milk2_ui_element::OnTimer(UINT_PTR nIDEvent)
 #endif
 }
 
-void milk2_ui_element::OnPaint(CDCHandle dc)
+void milk2_ui_element::OnPaint(CDCHandle /*dc*/)
 {
     MILK2_CONSOLE_LOG_LIMIT("OnPaint ", GetWnd())
     if (m_in_sizemove && m_milk2) // foobar2000 does not enter/exit size/move
@@ -296,7 +296,7 @@ void milk2_ui_element::OnPaint(CDCHandle dc)
 #endif
 }
 
-BOOL milk2_ui_element::OnEraseBkgnd(CDCHandle dc)
+BOOL milk2_ui_element::OnEraseBkgnd(CDCHandle /*dc*/)
 {
     MILK2_CONSOLE_LOG_LIMIT("OnEraseBkgnd ", GetWnd())
     ++s_count;

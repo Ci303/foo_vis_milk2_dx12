@@ -444,6 +444,6 @@ class milk2_config
     uint32_t m_sentinel = MAKEFOURCC('M', 'I', 'L', 'K'); //('K' << 24 | 'L' << 16 | 'I' << 8 | 'M');
     uint32_t m_version = 3;
 
-    void update_fonts() const;
+    void update_fonts();
     void update_paths();
 };
