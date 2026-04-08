@@ -34,6 +34,7 @@
 #define NOMCX
 #define WIN32_LEAN_AND_MEAN
 #include <helpers/foobar2000-lite+atl.h>
+#include <timeapi.h>
 #include <sdk/component.h>
 
 #ifdef _WIN32
