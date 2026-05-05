@@ -33,6 +33,7 @@
 
 #include "shell_defines.h"
 #include "deviceresources.h"
+#include "d3d12resources.h"
 #include "d3d11shim.h"
 
 #define DX_ERR_REGWIN -2
@@ -79,6 +80,24 @@ class DXContext final
     inline HWND GetHwnd() const { return m_hwnd; };
     void Show();
     void Clear();
+    void SetTextureDirectory(const wchar_t* textureDirectory);
+    bool SetTextureFile(const wchar_t* textureFile);
+    void DrawWaveform(const float* left,
+                      const float* right,
+                      size_t sampleCount,
+                      float bass,
+                      float mids,
+                      float treble,
+                      float waveR = 0.35f,
+                      float waveG = 0.85f,
+                      float waveB = 1.0f,
+                      float waveA = 1.0f,
+                      float waveScale = 1.0f,
+                      float waveX = 0.5f,
+                      float waveY = 0.5f,
+                      float decay = 0.97f,
+                      float zoom = 1.0f,
+                      float rot = 0.0f);
     void RestoreTarget();
     int GetBitDepth() const { return m_bpp; };
 
@@ -87,12 +106,13 @@ class DXContext final
     void CreateWindowSizeDependentResources();
 
     ID3D11Device1* GetD3DDevice() const noexcept { return m_deviceResources->GetD3DDevice(); }
-    DXGI_FORMAT GetBackBufferFormat() const noexcept { return m_deviceResources->GetBackBufferFormat(); }
+    DXGI_FORMAT GetBackBufferFormat() const noexcept { return m_useD3D12 ? m_d3d12Resources->GetBackBufferFormat() : m_deviceResources->GetBackBufferFormat(); }
     ID2D1Factory1* GetD2DFactory() const noexcept { return m_deviceResources->GetD2DFactory(); }
     ID2D1Device* GetD2DDevice() const noexcept { return m_deviceResources->GetD2DDevice(); }
     ID2D1DeviceContext* GetD2DDeviceContext() const noexcept { return m_deviceResources->GetD2DDeviceContext(); }
     IDWriteFactory1* GetDWriteFactory() const noexcept { return m_deviceResources->GetDWriteFactory(); }
     DX::DeviceResources* GetDeviceResources() const noexcept { return m_deviceResources.get(); }
+    bool IsD3D12Mode() const noexcept { return m_useD3D12; }
 
     // DO NOT WRITE TO THESE FROM OUTSIDE THE CLASS
     int m_ready;
@@ -110,7 +130,9 @@ class DXContext final
     BOOL Internal_Init(DXCONTEXT_PARAMS* pParams, BOOL bFirstInit);
     void Internal_CleanUp();
 
+    bool m_useD3D12;
     std::unique_ptr<DX::DeviceResources> m_deviceResources;
+    std::unique_ptr<DX::D3D12Resources> m_d3d12Resources;
 };
 
 #endif

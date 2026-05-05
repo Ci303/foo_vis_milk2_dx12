@@ -297,7 +297,7 @@ class milk2_ui_element : public ui_element_instance, public CWindowImpl<milk2_ui
     void SetSelectionSingle(size_t idx, bool toggle, bool focus, bool single_only);
 
     // Artwork callback methods
-    void on_album_art(album_art_data::ptr /*aad*/) { /*MILK2_CONSOLE_LOG("% AlbumArt"); if (wcsnlen_s(s_config.settings.m_szArtworkFormat, 256) == 0 && aad.is_valid()) { ExtractRasterData(static_cast<const uint8_t*>(aad->data()), aad->size()); }*/ }
+    void on_album_art(album_art_data::ptr aad) { (void)aad; /*MILK2_CONSOLE_LOG("% AlbumArt"); if (wcsnlen_s(s_config.settings.m_szArtworkFormat, 256) == 0 && aad.is_valid()) { ExtractRasterData(static_cast<const uint8_t*>(aad->data()), aad->size()); }*/ }
 
     void RegisterForArtwork();
     void ExtractRasterData(const uint8_t* data, size_t size) noexcept;

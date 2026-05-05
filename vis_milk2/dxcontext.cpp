@@ -45,17 +45,27 @@ DXContext::DXContext(HWND hWndWinamp, DXCONTEXT_PARAMS* pParams) noexcept(false)
 
     // Clear the active flag.
     m_ready = FALSE;
+    wchar_t dx12Mode[8]{};
+    m_useD3D12 = GetEnvironmentVariableW(L"FOO_VIS_MILK2_DX12_DEV", dx12Mode, static_cast<DWORD>(std::size(dx12Mode))) > 0 && wcscmp(dx12Mode, L"0") != 0;
 
     // Create the device.
     // Provide parameters for swap chain format, depth/stencil format, and back buffer count.
-    m_deviceResources = std::make_unique<DX::DeviceResources>(
-        m_current_mode.back_buffer_format, // backBufferFormat (default: DXGI_FORMAT_B8G8R8A8_UNORM)
-        m_current_mode.depth_buffer_format, // depthBufferFormat (default: DXGI_FORMAT_D24_UNORM_S8_UINT)
-        m_current_mode.back_buffer_count, // backBufferCount (default: 2)
-        m_current_mode.min_feature_level, // minFeatureLevel (default: D3D_FEATURE_LEVEL_9_1)
-        DX::DeviceResources::c_FlipPresent | ((m_current_mode.allow_page_tearing << 1) & DX::DeviceResources::c_AllowTearing) |
-            ((m_current_mode.enable_hdr << 2) & DX::DeviceResources::c_EnableHDR) // flags (default: flip, noTearing, noHDR)
-    );
+    const unsigned int flags = DX::DeviceResources::c_FlipPresent | ((m_current_mode.allow_page_tearing << 1) & DX::DeviceResources::c_AllowTearing) |
+        ((m_current_mode.enable_hdr << 2) & DX::DeviceResources::c_EnableHDR);
+    if (m_useD3D12)
+    {
+        m_d3d12Resources = std::make_unique<DX::D3D12Resources>(m_current_mode.back_buffer_format, m_current_mode.back_buffer_count, flags);
+    }
+    else
+    {
+        m_deviceResources = std::make_unique<DX::DeviceResources>(
+            m_current_mode.back_buffer_format, // backBufferFormat (default: DXGI_FORMAT_B8G8R8A8_UNORM)
+            m_current_mode.depth_buffer_format, // depthBufferFormat (default: DXGI_FORMAT_D24_UNORM_S8_UINT)
+            m_current_mode.back_buffer_count, // backBufferCount (default: 2)
+            m_current_mode.min_feature_level, // minFeatureLevel (default: D3D_FEATURE_LEVEL_9_1)
+            flags // flags (default: flip, noTearing, noHDR)
+        );
+    }
 }
 
 DXContext::~DXContext()
@@ -80,8 +90,16 @@ BOOL DXContext::Internal_Init(DXCONTEXT_PARAMS* /* pParams */, BOOL /* bFirstIni
     m_client_width = std::max(1l, r.right - r.left);
     m_client_height = std::max(1l, r.bottom - r.top);
 
-    m_deviceResources->SetWindow(m_hwnd, m_client_width, m_client_height);
+    if (m_useD3D12)
+    {
+        m_d3d12Resources->SetWindow(m_hwnd, m_client_width, m_client_height);
+        m_d3d12Resources->CreateDeviceResources();
+        m_d3d12Resources->CreateWindowSizeDependentResources();
+        m_ready = TRUE;
+        return TRUE;
+    }
 
+    m_deviceResources->SetWindow(m_hwnd, m_client_width, m_client_height);
     m_deviceResources->CreateDeviceIndependentResources();
     CreateDeviceIndependentResources();
 
@@ -100,12 +118,21 @@ BOOL DXContext::Internal_Init(DXCONTEXT_PARAMS* /* pParams */, BOOL /* bFirstIni
 // Display the swap chain contents to the screen.
 void DXContext::Show()
 {
-    m_deviceResources->Present();
+    if (m_useD3D12)
+        m_d3d12Resources->Present();
+    else
+        m_deviceResources->Present();
 }
 
 // Clear the back buffers.
 void DXContext::Clear()
 {
+    if (m_useD3D12)
+    {
+        m_d3d12Resources->Clear();
+        return;
+    }
+
     m_deviceResources->PIXBeginEvent(L"Clear");
 
     // Clear the views.
@@ -124,8 +151,47 @@ void DXContext::Clear()
     m_deviceResources->PIXEndEvent();
 }
 
+void DXContext::SetTextureDirectory(const wchar_t* textureDirectory)
+{
+    if (m_useD3D12 && m_d3d12Resources)
+    {
+        m_d3d12Resources->SetTextureDirectory(textureDirectory);
+    }
+}
+
+bool DXContext::SetTextureFile(const wchar_t* textureFile)
+{
+    return m_useD3D12 && m_d3d12Resources && m_d3d12Resources->SetTextureFile(textureFile);
+}
+
+void DXContext::DrawWaveform(const float* left,
+                             const float* right,
+                             size_t sampleCount,
+                             float bass,
+                             float mids,
+                             float treble,
+                             float waveR,
+                             float waveG,
+                             float waveB,
+                             float waveA,
+                             float waveScale,
+                             float waveX,
+                             float waveY,
+                             float decay,
+                             float zoom,
+                             float rot)
+{
+    if (m_useD3D12)
+    {
+        m_d3d12Resources->DrawWaveform(left, right, sampleCount, bass, mids, treble, waveR, waveG, waveB, waveA, waveScale, waveX, waveY, decay, zoom, rot);
+    }
+}
+
 void DXContext::RestoreTarget()
 {
+    if (m_useD3D12)
+        return;
+
     auto rt = m_deviceResources->GetRenderTarget();
     m_lpDevice->SetRenderTarget(rt);
 }
@@ -158,13 +224,17 @@ BOOL DXContext::StartOrRestartDevice(DXCONTEXT_PARAMS* pParams)
 
 void DXContext::OnWindowMoved()
 {
-    auto const r = m_deviceResources->GetOutputSize();
-    m_deviceResources->WindowSizeChanged(r.right, r.bottom);
+    auto const r = m_useD3D12 ? m_d3d12Resources->GetOutputSize() : m_deviceResources->GetOutputSize();
+    if (m_useD3D12)
+        m_d3d12Resources->WindowSizeChanged(r.right, r.bottom);
+    else
+        m_deviceResources->WindowSizeChanged(r.right, r.bottom);
 }
 
 void DXContext::OnDisplayChange()
 {
-    m_deviceResources->UpdateColorSpace();
+    if (!m_useD3D12)
+        m_deviceResources->UpdateColorSpace();
 }
 
 // Call this function on `WM_EXITSIZEMOVE`.
@@ -181,14 +251,16 @@ BOOL DXContext::OnWindowSizeChanged(int width, int height)
     m_client_width = width;
     m_client_height = height;
 
-    if (!m_deviceResources->WindowSizeChanged(width, height))
+    const bool resized = m_useD3D12 ? m_d3d12Resources->WindowSizeChanged(width, height) : m_deviceResources->WindowSizeChanged(width, height);
+    if (!resized)
     {
         m_lastErr = DX_ERR_RESIZEFAILED;
         m_ready = FALSE;
         return FALSE;
     }
 
-    CreateWindowSizeDependentResources();
+    if (!m_useD3D12)
+        CreateWindowSizeDependentResources();
 
     m_ready = TRUE;
     return TRUE;
@@ -208,14 +280,16 @@ BOOL DXContext::OnWindowSwap(HWND window, int width, int height)
     m_client_width = width;
     m_client_height = height;
 
-    if (!m_deviceResources->WindowSwap(m_hwnd, m_client_width, m_client_height))
+    const bool swapped = m_useD3D12 ? m_d3d12Resources->WindowSwap(m_hwnd, m_client_width, m_client_height) : m_deviceResources->WindowSwap(m_hwnd, m_client_width, m_client_height);
+    if (!swapped)
     {
         m_lastErr = DX_ERR_SWAPFAIL;
         m_ready = FALSE;
         return FALSE;
     }
 
-    CreateWindowSizeDependentResources();
+    if (!m_useD3D12)
+        CreateWindowSizeDependentResources();
 
     m_ready = TRUE;
     return TRUE;

@@ -433,6 +433,7 @@
     <ClInclude Include="api.h" />
     <ClInclude Include="constanttable.h" />
     <ClInclude Include="d3d11shim.h" />
+    <ClInclude Include="d3d12resources.h" />
     <ClInclude Include="deviceresources.h" />
     <ClInclude Include="defines.h" />
     <ClInclude Include="dxcontext.h" />
@@ -456,6 +457,7 @@
   <ItemGroup>
     <ClCompile Include="constanttable.cpp" />
     <ClCompile Include="d3d11shim.cpp" />
+    <ClCompile Include="d3d12resources.cpp" />
     <ClCompile Include="deviceresources.cpp" />
     <ClCompile Include="dxcontext.cpp" />
     <ClCompile Include="fft.cpp">

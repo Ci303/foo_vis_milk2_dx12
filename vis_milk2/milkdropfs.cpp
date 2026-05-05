@@ -203,11 +203,9 @@ bool CPlugin::RenderStringToTitleTexture()
     {
         return false;
     }
-    pRenderTarget->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
     lpDevice->SetRenderTarget(m_lpDDSTitle, &pDSView);
 
-    // Clear the texture to transparent so the title quad only carries glyphs,
-    // not an opaque background rectangle.
+    // Clear the texture to black.
     {
         lpDevice->SetVertexShader(NULL, NULL);
         //lpDevice->SetFVF(WFVERTEX_FORMAT);
@@ -222,18 +220,10 @@ bool CPlugin::RenderStringToTitleTexture()
             verts[i].x = (i % 2 == 0) ? -1.0f : 1.0f;
             verts[i].y = (i / 2 == 0) ? -1.0f : 1.0f;
             verts[i].z = 0.0f;
-            verts[i].a = 0.0f; verts[i].r = 0.0f; verts[i].g = 0.0f; verts[i].b = 0.0f;
+            verts[i].a = 1.0f; verts[i].r = 0.0f; verts[i].g = 0.0f; verts[i].b = 0.0f;
         }
 
         lpDevice->DrawPrimitive(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP, 2, verts, sizeof(MDVERTEX));
-    }
-
-    pRenderTarget->BeginDraw();
-    pRenderTarget->Clear(D2D1::ColorF(0, 0.0f));
-    hr = pRenderTarget->EndDraw();
-    if (FAILED(hr))
-    {
-        return false;
     }
 
     // 1. Clip title if too many characters.
@@ -1075,13 +1065,8 @@ void CPlugin::RenderFrame(int bRedraw)
 
     float fProgress = (GetTime() - m_supertext.fStartTime) / m_supertext.fDuration;
 
-    // Do not burn song titles into the feedback buffer once their animation
-    // duration has elapsed; that causes them to linger unpredictably based on
-    // the current preset's feedback.
-    if (m_supertext.fStartTime >= 0.0f &&
-        fProgress >= 1.0f &&
-        !m_supertext.bRedrawSuperText &&
-        !m_supertext.bIsSongTitle)
+    // If song title animation just ended, burn it into the VS.
+    if (m_supertext.fStartTime >= 0.0f && fProgress >= 1.0f && !m_supertext.bRedrawSuperText)
     {
         ShowSongTitleAnim(m_nTexSizeX, m_nTexSizeY, 1.0f);
 #ifdef _SUPERTEXT
@@ -4308,9 +4293,7 @@ void CPlugin::ShowSongTitleAnim(int w, int h, float fProgress)
 
     lpDevice->SetTexture(0, m_lpDDSTitle);
     lpDevice->SetVertexShader(NULL, NULL);
-    lpDevice->SetPixelShader(NULL, NULL);
-    lpDevice->SetSamplerState(0, D3D11_FILTER_MIN_MAG_MIP_LINEAR, D3D11_TEXTURE_ADDRESS_CLAMP);
-    lpDevice->SetShader(0);
+    //lpDevice->SetShader(0);
     //lpDevice->SetFVF(SPRITEVERTEX_FORMAT);
 
     lpDevice->SetBlendState(true, D3D11_BLEND_ONE, D3D11_BLEND_ONE);

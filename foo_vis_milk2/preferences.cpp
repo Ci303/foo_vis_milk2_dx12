@@ -14,46 +14,6 @@ extern HWND g_hWindow;
 
 namespace
 {
-using font_info_store_t = F<NUM_BASIC_FONTS + NUM_EXTRA_FONTS>;
-using font_array_t = td_fontinfo[NUM_BASIC_FONTS + NUM_EXTRA_FONTS];
-
-struct font_dialog_row_t
-{
-    int name;
-    int font;
-    int size;
-    int bold;
-    int italics;
-    int aa;
-};
-
-constexpr font_dialog_row_t g_font_dialog_rows[MAX_EXTRA_FONTS] = {
-    {IDC_FONT_NAME_5, IDC_FONT5, IDC_FONTSIZE5, IDC_FONTBOLD5, IDC_FONTITAL5, IDC_FONTAA5},
-    {IDC_FONT_NAME_6, IDC_FONT6, IDC_FONTSIZE6, IDC_FONTBOLD6, IDC_FONTITAL6, IDC_FONTAA6},
-    {IDC_FONT_NAME_7, IDC_FONT7, IDC_FONTSIZE7, IDC_FONTBOLD7, IDC_FONTITAL7, IDC_FONTAA7},
-    {IDC_FONT_NAME_8, IDC_FONT8, IDC_FONTSIZE8, IDC_FONTBOLD8, IDC_FONTITAL8, IDC_FONTAA8},
-    {IDC_FONT_NAME_9, IDC_FONT9, IDC_FONTSIZE9, IDC_FONTBOLD9, IDC_FONTITAL9, IDC_FONTAA9},
-};
-
-constexpr int g_font_combo_ids[] = {
-    IDC_FONT1, IDC_FONT2, IDC_FONT3, IDC_FONT4, IDC_FONT5, IDC_FONT6, IDC_FONT7, IDC_FONT8, IDC_FONT9,
-};
-
-template <typename T, size_t N>
-constexpr size_t countof(const T (&)[N]) noexcept
-{
-    return N;
-}
-
-font_info_store_t load_font_info_store();
-void load_font_info(font_array_t& fonts);
-void store_font_info(const font_array_t& fonts);
-void copy_wide_string(wchar_t* destination, size_t destination_count, const wchar_t* source);
-pfc::string8 get_preset_dir_setting();
-void offset_dialog_control(HWND dialog, int control_id, int dx, int dy);
-void hide_font_dialog_row(HWND dialog, const font_dialog_row_t& row);
-void layout_font_dialog(HWND dialog);
-
 // clang-format off
 static cfg_bool cfg_bPresetLockOnAtStartup(guid_cfg_bPresetLockOnAtStartup, default_bPresetLockOnAtStartup);
 static cfg_bool cfg_bPreventScollLockHandling(guid_cfg_bPreventScollLockHandling, default_bPreventScollLockHandling);
@@ -105,91 +65,11 @@ static cfg_float cfg_fTimeBetweenRandomSongTitles(guid_cfg_fTimeBetweenRandomSon
 static cfg_float cfg_fTimeBetweenRandomCustomMsgs(guid_cfg_fTimeBetweenRandomCustomMsgs, static_cast<double>(default_fTimeBetweenRandomCustomMsgs));
 static cfg_string cfg_szTitleFormat(guid_cfg_szTitleFormat, default_szTitleFormat);
 static cfg_string cfg_szArtworkFormat(guid_cfg_szArtworkFormat, default_szArtworkFormat);
-static cfg_struct_t<font_info_store_t> cfg_stFontInfo(guid_cfg_stFontInfo, _stFonts);
+static cfg_blob cfg_stFontInfo(guid_cfg_stFontInfo, default_stFontInfo, sizeof(td_fontinfo) * (NUM_BASIC_FONTS + NUM_EXTRA_FONTS));
 static advconfig_branch_factory g_advconfigBranch("MilkDrop", guid_advconfig_branch, advconfig_branch::guid_branch_vis, 0);
 static advconfig_checkbox_factory cfg_bDebugOutput("Debug output", "milk2.bDebugOutput", guid_cfg_bDebugOutput, guid_advconfig_branch, order_bDebugOutput, default_bDebugOutput, 0);
 static advconfig_string_factory cfg_szPresetDir("Preset directory", "milk2.szPresetDir", guid_cfg_szPresetDir, guid_advconfig_branch, order_szPresetDir, "", advconfig_entry_string::flag_is_folder_path);
 // clang-format on
-
-font_info_store_t load_font_info_store()
-{
-    return cfg_stFontInfo.get();
-}
-
-void load_font_info(font_array_t& fonts)
-{
-    const auto store = load_font_info_store();
-    memcpy_s(fonts, sizeof(fonts), store.fontinfo, sizeof(store.fontinfo));
-}
-
-void store_font_info(const font_array_t& fonts)
-{
-    font_info_store_t store{};
-    memcpy_s(store.fontinfo, sizeof(store.fontinfo), fonts, sizeof(fonts));
-    cfg_stFontInfo = store;
-}
-
-void copy_wide_string(wchar_t* destination, size_t destination_count, const wchar_t* source)
-{
-    wcscpy_s(destination, destination_count, source);
-}
-
-pfc::string8 get_preset_dir_setting()
-{
-    pfc::string8 presetDir;
-    cfg_szPresetDir.get(presetDir);
-    return presetDir;
-}
-
-void offset_dialog_control(HWND dialog, int control_id, int dx, int dy)
-{
-    RECT rect{};
-    ::GetWindowRect(::GetDlgItem(dialog, control_id), &rect);
-    ::ScreenToClient(dialog, reinterpret_cast<LPPOINT>(&rect));
-    ::SetWindowPos(::GetDlgItem(dialog, control_id), NULL, rect.left + dx, rect.top + dy, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
-}
-
-void hide_font_dialog_row(HWND dialog, const font_dialog_row_t& row)
-{
-    ::ShowWindow(::GetDlgItem(dialog, row.name), SW_HIDE);
-    ::ShowWindow(::GetDlgItem(dialog, row.font), SW_HIDE);
-    ::ShowWindow(::GetDlgItem(dialog, row.size), SW_HIDE);
-    ::ShowWindow(::GetDlgItem(dialog, row.bold), SW_HIDE);
-    ::ShowWindow(::GetDlgItem(dialog, row.italics), SW_HIDE);
-    ::ShowWindow(::GetDlgItem(dialog, row.aa), SW_HIDE);
-}
-
-void layout_font_dialog(HWND dialog)
-{
-    if constexpr (MAX_EXTRA_FONTS - NUM_EXTRA_FONTS <= 0)
-    {
-        return;
-    }
-
-    for (size_t i = NUM_EXTRA_FONTS; i < countof(g_font_dialog_rows); ++i)
-    {
-        hide_font_dialog_row(dialog, g_font_dialog_rows[i]);
-    }
-
-    RECT firstExtraRow{};
-    RECT secondExtraRow{};
-    if (!::GetWindowRect(::GetDlgItem(dialog, g_font_dialog_rows[0].name), &firstExtraRow) ||
-        !::GetWindowRect(::GetDlgItem(dialog, g_font_dialog_rows[1].name), &secondExtraRow))
-    {
-        return;
-    }
-
-    RECT dialogRect{};
-    ::GetWindowRect(dialog, &dialogRect);
-
-    const int hiddenRows = MAX_EXTRA_FONTS - NUM_EXTRA_FONTS;
-    const int rowPitch = secondExtraRow.top - firstExtraRow.top;
-    const int verticalOffset = hiddenRows * rowPitch;
-    ::SetWindowPos(dialog, NULL, 0, 0, dialogRect.right - dialogRect.left, dialogRect.bottom - dialogRect.top - verticalOffset, SWP_NOMOVE | SWP_NOZORDER);
-    offset_dialog_control(dialog, IDC_FONT_TEXT, 0, -verticalOffset);
-    offset_dialog_control(dialog, IDOK, 0, -verticalOffset);
-    offset_dialog_control(dialog, IDCANCEL, 0, -verticalOffset);
-}
 } // namespace
 
 #pragma region Preferences Page
@@ -676,19 +556,13 @@ void milk2_preferences_page::apply()
     SaveMaxFps(FULLSCREEN);
 
     GetDlgItemText(IDC_BETWEEN_TIME, buf, 256);
-    {
-        float value = wcstof(buf, &stop);
-        if (value < 0.1)
-            value = 0.1;
-        cfg_fTimeBetweenPresets = value;
-    }
+    cfg_fTimeBetweenPresets = wcstof(buf, &stop);
+    if (cfg_fTimeBetweenPresets < 0.1f)
+        cfg_fTimeBetweenPresets = 0.1f;
     GetDlgItemText(IDC_BETWEEN_TIME_RANDOM, buf, 256);
-    {
-        float value = wcstof(buf, &stop);
-        if (value < 0.0)
-            value = 0.0;
-        cfg_fTimeBetweenPresetsRand = value;
-    }
+    cfg_fTimeBetweenPresetsRand = wcstof(buf, &stop);
+    if (cfg_fTimeBetweenPresetsRand < 0.0f)
+        cfg_fTimeBetweenPresetsRand = 0.0f;
     GetDlgItemText(IDC_BLEND_AUTO, buf, 256);
     cfg_fBlendTimeAuto = wcstof(buf, &stop);
     GetDlgItemText(IDC_BLEND_USER, buf, 256);
@@ -698,27 +572,27 @@ void milk2_preferences_page::apply()
     cfg_fHardCutHalflife = wcstof(buf, &stop);
     t = SendMessage(GetDlgItem(IDC_HARDCUT_LOUDNESS), TBM_GETPOS, (WPARAM)0, (LPARAM)0);
     if (t != CB_ERR)
-        cfg_fHardCutLoudnessThresh = static_cast<float>(1.25f + t / 20.0f);
+        cfg_fHardCutLoudnessThresh = static_cast<double>(1.25f + t / 20.0f);
     cfg_bHardCutsDisabled = static_cast<bool>(IsDlgButtonChecked(IDC_CB_HARDCUTS));
 
-    cfg_nMaxPSVersion = static_cast<t_int32>(ReadCBValue(IDC_SHADERS));
+    cfg_nMaxPSVersion = ReadCBValue(IDC_SHADERS);
 
     //cfg_nTexBitsPerCh = ReadCBValue(IDC_TEXFORMAT);
 
-    cfg_nGridX = static_cast<t_int32>(ReadCBValue(IDC_MESHSIZECOMBO));
+    cfg_nGridX = ReadCBValue(IDC_MESHSIZECOMBO);
 
-    cfg_nCanvasStretch = static_cast<t_int32>(ReadCBValue(IDC_STRETCH2));
+    cfg_nCanvasStretch = ReadCBValue(IDC_STRETCH2);
 
-    cfg_nTexSizeX = static_cast<t_int32>(ReadCBValue(IDC_TEXSIZECOMBO));
+    cfg_nTexSizeX = ReadCBValue(IDC_TEXSIZECOMBO);
 
     t = SendMessage(GetDlgItem(IDC_BRIGHT_SLIDER2), TBM_GETPOS, (WPARAM)0, (LPARAM)0);
     if (t != CB_ERR)
-        cfg_n16BitGamma = static_cast<t_int32>(t);
+        cfg_n16BitGamma = static_cast<int64_t>(t);
     cfg_bAutoGamma = static_cast<bool>(IsDlgButtonChecked(IDC_CB_AUTOGAMMA2));
 
-    cfg_nMaxBytes = static_cast<t_int32>(ReadCBValue(IDC_MAX_BYTES2));
+    cfg_nMaxBytes = ReadCBValue(IDC_MAX_BYTES2);
 
-    cfg_nMaxImages = static_cast<t_int32>(ReadCBValue(IDC_MAX_IMAGES2));
+    cfg_nMaxImages = ReadCBValue(IDC_MAX_IMAGES2);
 
     GetDlgItemText(IDC_SONGTITLEANIM_DURATION, buf, 256);
     cfg_fSongTitleAnimDuration = wcstof(buf, &stop);
@@ -753,7 +627,7 @@ void milk2_preferences_page::apply()
 
     if (m_resetpage)
     {
-        cfg_stFontInfo = _stFonts;
+        cfg_stFontInfo.set(default_stFontInfo, sizeof(td_fontinfo) * (NUM_BASIC_FONTS + NUM_EXTRA_FONTS));
         m_resetpage = false;
     }
 
@@ -784,7 +658,7 @@ bool milk2_preferences_page::HasChanged() const
     {
         if (n > 0)
             n = MAX_MAX_FPS + 1 - n;
-        combobox_changes = combobox_changes || (static_cast<int64_t>(n) != static_cast<int64_t>(cfg_max_fps_fs));
+        combobox_changes = combobox_changes || (static_cast<UINT>(n) != cfg_max_fps_fs);
     }
     combobox_changes = combobox_changes ||
                        IsComboDiff(IDC_SHADERS, cfg_nMaxPSVersion) ||
@@ -1030,10 +904,15 @@ static int CALLBACK EnumFontsProc(
     if (lplf->lfFaceName[0] == L'@' || lplf->lfFaceName[0] == L'8')
         return 1;
 
-    for (const int comboId : g_font_combo_ids)
-    {
-        SendMessage(GetDlgItem((HWND)lpData, comboId), CB_ADDSTRING, 0, (LPARAM)(lplf->lfFaceName));
-    }
+    SendMessage(GetDlgItem((HWND)lpData, IDC_FONT1), CB_ADDSTRING, 0, (LPARAM)(lplf->lfFaceName));
+    SendMessage(GetDlgItem((HWND)lpData, IDC_FONT2), CB_ADDSTRING, 0, (LPARAM)(lplf->lfFaceName));
+    SendMessage(GetDlgItem((HWND)lpData, IDC_FONT3), CB_ADDSTRING, 0, (LPARAM)(lplf->lfFaceName));
+    SendMessage(GetDlgItem((HWND)lpData, IDC_FONT4), CB_ADDSTRING, 0, (LPARAM)(lplf->lfFaceName));
+    SendMessage(GetDlgItem((HWND)lpData, IDC_FONT5), CB_ADDSTRING, 0, (LPARAM)(lplf->lfFaceName));
+    SendMessage(GetDlgItem((HWND)lpData, IDC_FONT6), CB_ADDSTRING, 0, (LPARAM)(lplf->lfFaceName));
+    SendMessage(GetDlgItem((HWND)lpData, IDC_FONT7), CB_ADDSTRING, 0, (LPARAM)(lplf->lfFaceName));
+    SendMessage(GetDlgItem((HWND)lpData, IDC_FONT8), CB_ADDSTRING, 0, (LPARAM)(lplf->lfFaceName));
+    SendMessage(GetDlgItem((HWND)lpData, IDC_FONT9), CB_ADDSTRING, 0, (LPARAM)(lplf->lfFaceName));
 
     return 1;
 }
@@ -1109,7 +988,10 @@ void milk2_preferences_page::SaveFontI(td_fontinfo* fi, DWORD ctrl1, DWORD ctrl2
 
 void milk2_preferences_page::ScootControl(HWND hwnd, int ctrl_id, int dx, int dy)
 {
-    offset_dialog_control(hwnd, ctrl_id, dx, dy);
+    RECT r;
+    ::GetWindowRect(::GetDlgItem(hwnd, ctrl_id), &r);
+    ::ScreenToClient(hwnd, (LPPOINT)&r);
+    ::SetWindowPos(::GetDlgItem(hwnd, ctrl_id), NULL, r.left + dx, r.top + dy, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
 }
 
 BOOL milk2_preferences_page::PluginShellFontDialogProc(HWND hdlg, UINT msg, WPARAM wParam, LPARAM lParam)
@@ -1152,8 +1034,18 @@ BOOL milk2_preferences_page::PluginShellFontDialogProc(HWND hdlg, UINT msg, WPAR
                 // original position. Ignores size arguments.
                 ::SetWindowPos(hdlg, HWND_TOP, rcOwner.left + (rc.right / 2), rcOwner.top + (rc.bottom / 2), 0, 0, SWP_NOSIZE);
 
-                // Hide unsupported extra-font rows and tighten the dialog height.
-                layout_font_dialog(hdlg);
+                // Finally, if not all extra fonts are in use, shrink the window size and
+                // move up any controls that were at the bottom.
+                RECT r;
+                ::GetWindowRect(hdlg, &r);
+                if constexpr (MAX_EXTRA_FONTS - NUM_EXTRA_FONTS > 0)
+                {
+                    int scoot_factor = static_cast<int>(176.0f * (MAX_EXTRA_FONTS - NUM_EXTRA_FONTS) / static_cast<float>(MAX_EXTRA_FONTS));
+                    ::SetWindowPos(hdlg, NULL, 0, 0, r.right - r.left, r.bottom - r.top - scoot_factor, SWP_NOMOVE | SWP_NOZORDER);
+                    ScootControl(hdlg, IDC_FONT_TEXT, 0, -scoot_factor);
+                    ScootControl(hdlg, IDOK, 0, -scoot_factor);
+                    ScootControl(hdlg, IDCANCEL, 0, -scoot_factor);
+                }
 
                 HDC hdc = ::GetDC(hdlg);
                 if (hdc)
@@ -1163,7 +1055,9 @@ BOOL milk2_preferences_page::PluginShellFontDialogProc(HWND hdlg, UINT msg, WPAR
                 }
 
                 td_fontinfo fonts[NUM_BASIC_FONTS + NUM_EXTRA_FONTS]{};
-                load_font_info(fonts);
+                auto v = cfg_stFontInfo.get();
+                if (v.is_valid() && v->size() == sizeof(fonts))
+                    memcpy_s(fonts, sizeof(fonts), v->get_ptr(), v->size());
 
                 InitFont(1, 0);
                 InitFont(2, 0);
@@ -1179,7 +1073,7 @@ BOOL milk2_preferences_page::PluginShellFontDialogProc(HWND hdlg, UINT msg, WPAR
                 InitFont(7, EXTRA_FONT_3_NAME);
 #endif
 #if (NUM_EXTRA_FONTS >= 4)
-                InitFont(8, EXTRA_FONT_4_NAME);
+                InitFont(5, EXTRA_FONT_4_NAME);
 #endif
 #if (NUM_EXTRA_FONTS >= 5)
                 InitFont(9, EXTRA_FONT_5_NAME);
@@ -1208,12 +1102,12 @@ BOOL milk2_preferences_page::PluginShellFontDialogProc(HWND hdlg, UINT msg, WPAR
                             SaveFont(7);
 #endif
 #if (NUM_EXTRA_FONTS >= 4)
-                            SaveFont(8);
+                            SaveFont(5);
 #endif
 #if (NUM_EXTRA_FONTS >= 5)
                             SaveFont(9);
 #endif
-                            store_font_info(fonts);
+                            cfg_stFontInfo.set(fonts, sizeof(fonts));
                         }
                         ::EndDialog(hdlg, id);
                         break;
@@ -1349,9 +1243,11 @@ void milk2_config::reset()
 }
 
 // Initializes all font dialog variables.
-void milk2_config::update_fonts()
+void milk2_config::update_fonts() const
 {
-    load_font_info(settings.m_fontinfo);
+    auto v = cfg_stFontInfo.get();
+    if (v.is_valid() && v->size() == sizeof(settings.m_fontinfo))
+        memcpy_s((void*)settings.m_fontinfo, sizeof(settings.m_fontinfo), v->get_ptr(), v->size());
 }
 
 // Resolves profile directory, taking care of the case where the path contains
@@ -1421,22 +1317,20 @@ void milk2_config::initialize_paths()
 
 void milk2_config::update_paths()
 {
-    auto presetDir = get_preset_dir_setting();
-    if (m_version < 2 || presetDir.empty())
+    if (m_version < 2 || cfg_szPresetDir.get().empty())
     {
-        copy_wide_string(settings.m_szPresetDir, _countof(settings.m_szPresetDir), default_szPresetDir);
+        wcscpy_s(settings.m_szPresetDir, default_szPresetDir);
         cfg_szPresetDir.set(pfc::utf8FromWide(default_szPresetDir));
     }
     else
     {
-        presetDir.end_with_slash();
-        const auto presetDirWide = pfc::wideFromUTF8(presetDir);
-        copy_wide_string(settings.m_szPresetDir, _countof(settings.m_szPresetDir), presetDirWide.c_str());
+        cfg_szPresetDir.get().end_with_slash();
+        wcscpy_s(settings.m_szPresetDir, pfc::wideFromUTF8(cfg_szPresetDir.get()).c_str());
     }
-    copy_wide_string(settings.m_szPluginsDirPath, _countof(settings.m_szPluginsDirPath), default_szPluginsDirPath);
-    copy_wide_string(settings.m_szConfigIniFile, _countof(settings.m_szConfigIniFile), default_szConfigIniFile);
-    copy_wide_string(settings.m_szMsgIniFile, _countof(settings.m_szMsgIniFile), default_szMsgIniFile);
-    copy_wide_string(settings.m_szImgIniFile, _countof(settings.m_szImgIniFile), default_szImgIniFile);
+    wcscpy_s(settings.m_szPluginsDirPath, default_szPluginsDirPath);
+    wcscpy_s(settings.m_szConfigIniFile, default_szConfigIniFile);
+    wcscpy_s(settings.m_szMsgIniFile, default_szMsgIniFile);
+    wcscpy_s(settings.m_szImgIniFile, default_szImgIniFile);
 }
 
 // Reads the configuration from the foobar2000 configuration system.

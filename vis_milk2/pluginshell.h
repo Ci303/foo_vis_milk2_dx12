@@ -120,6 +120,7 @@ class CPluginShell : public DX::IDeviceNotify
     int GetHeight() const; // returns height of plugin window interior, in pixels. Note: in windowed mode, this is a fudged, larger, aligned value, and on final display, it gets cropped.
     int GetBitDepth() const; // returns 8, 16, 24 (rare), or 32
     D3D11Shim* GetDevice() const; // returns a pointer to the DirectX 11 device. NOT persistent; can change!
+    bool IsD3D12Mode() const;
 
     // PURE VIRTUAL FUNCTIONS (...must be implemented by derived classes)
     // ------------------------------------------------------------

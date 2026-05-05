@@ -1022,7 +1022,16 @@ int CPlugin::AllocateMilkDropNonDX11()
     m_pOldState->Initialize();
     m_pNewState->Initialize();
 
-    //LoadRandomPreset(0.0f); // avoid this here; causes some DX9 stuff to happen
+    if (IsD3D12Mode() && !m_bInitialPresetSelected)
+    {
+        wchar_t textureDir[MAX_PATH]{};
+        swprintf_s(textureDir, L"%stextures\\", m_szMilkdrop2Path);
+        m_lpDX->SetTextureDirectory(textureDir);
+
+        UpdatePresetList(true);
+        LoadRandomPreset(0.0f);
+        m_bInitialPresetSelected = true;
+    }
 
     return true;
 }
@@ -2337,6 +2346,96 @@ static bool PickRandomTexture(const wchar_t* prefix, wchar_t* szRetTextureFilena
     return true;
 }
 
+static bool IsShaderIdentifierChar(char c)
+{
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_';
+}
+
+static bool ExtractSamplerRoot(const char* shaderText, wchar_t* rootName)
+{
+    if (!shaderText)
+        return false;
+
+    const char* cursor = shaderText;
+    while ((cursor = strstr(cursor, "sampler_")) != nullptr)
+    {
+        cursor += 8;
+        char name[MAX_PATH]{};
+        size_t n = 0;
+        while (IsShaderIdentifierChar(cursor[n]) && n < std::size(name) - 1)
+        {
+            name[n] = cursor[n];
+            ++n;
+        }
+        if (n == 0)
+            continue;
+
+        wcscpy_s(rootName, MAX_PATH, AutoWide(name));
+
+        if (wcslen(rootName) > 3 && rootName[2] == L'_')
+        {
+            wchar_t filter[3]{rootName[0], rootName[1], L'\0'};
+            _wcsupr_s(filter);
+            if (!wcscmp(filter, L"FW") || !wcscmp(filter, L"FC") || !wcscmp(filter, L"PW") || !wcscmp(filter, L"PC") ||
+                !wcscmp(filter, L"WF") || !wcscmp(filter, L"CF") || !wcscmp(filter, L"WP") || !wcscmp(filter, L"CP"))
+            {
+                memmove(rootName, rootName + 3, (wcslen(rootName + 3) + 1) * sizeof(wchar_t));
+            }
+        }
+
+        if (!_wcsicmp(rootName, L"main") || !_wcsnicmp(rootName, L"blur", 4))
+            continue;
+
+        return true;
+    }
+
+    return false;
+}
+
+bool CPlugin::SelectD3D12PresetTexture()
+{
+    if (!IsD3D12Mode())
+        return false;
+
+    wchar_t rootName[MAX_PATH]{};
+    if (!ExtractSamplerRoot(m_pState->m_szCompShadersText, rootName) && !ExtractSamplerRoot(m_pState->m_szWarpShadersText, rootName))
+        return false;
+
+    if (!wcsncmp(L"rand", rootName, 4) &&
+        IsNumericChar(rootName[4]) &&
+        IsNumericChar(rootName[5]) &&
+        (rootName[6] == 0 || rootName[6] == L'_'))
+    {
+        wchar_t prefix[MAX_PATH]{};
+        if (rootName[6] == L'_')
+            wcscpy_s(prefix, rootName + 7);
+
+        int randSlot = -1;
+        swscanf_s(rootName + 4, L"%d", &randSlot);
+        if (randSlot >= 0 && randSlot <= 15 && PickRandomTexture(prefix, rootName))
+        {
+            wchar_t* dot = wcsrchr(rootName, L'.');
+            if (dot)
+                *dot = 0;
+        }
+    }
+
+    static constexpr const wchar_t* d3d12TextureExts[] = {L"jpg", L"jpeg", L"png", L"bmp", L"gif", L"jfif"};
+    wchar_t filename[MAX_PATH]{};
+    for (const wchar_t* ext : d3d12TextureExts)
+    {
+        swprintf_s(filename, L"%stextures\\%s.%s", m_szMilkdrop2Path, rootName, ext);
+        if (GetFileAttributes(filename) != INVALID_FILE_ATTRIBUTES && m_lpDX->SetTextureFile(filename))
+            return true;
+
+        swprintf_s(filename, L"%s%s.%s", m_szPresetDir, rootName, ext);
+        if (GetFileAttributes(filename) != INVALID_FILE_ATTRIBUTES && m_lpDX->SetTextureFile(filename))
+            return true;
+    }
+
+    return false;
+}
+
 void CShaderParams::CacheParams(CConstantTable* pCT, bool /* bHardErrors */)
 {
     Clear();
@@ -3374,17 +3473,54 @@ void CPlugin::MilkDropRenderFrame(int redraw)
 
     if (!redraw)
     {
-#ifndef _FOOBAR
-        wchar_t currentSongTitle[ARRAYSIZE(m_szSongTitle)] = {};
-        GetWinampSongTitle(GetWinampWindow(), currentSongTitle, ARRAYSIZE(currentSongTitle));
-        if (currentSongTitle[0] != L'\0' && wcscmp(currentSongTitle, m_szSongTitlePrev) != 0)
+        GetWinampSongTitle(GetWinampWindow(), m_szSongTitle, ARRAYSIZE(m_szSongTitle));
+        if (wcscmp(m_szSongTitle, m_szSongTitlePrev) != 0)
         {
-            wcscpy_s(m_szSongTitle, currentSongTitle);
-            wcscpy_s(m_szSongTitlePrev, currentSongTitle);
+            wcscpy_s(m_szSongTitlePrev, m_szSongTitle);
             if (m_bSongTitleAnims)
                 LaunchSongTitleAnim();
         }
-#endif
+    }
+
+    if (IsD3D12Mode())
+    {
+        if (!redraw)
+            DoCustomSoundAnalysis();
+
+        const float time = GetTime();
+        const float bass = (m_sound.imm[0][0] + m_sound.imm[1][0]) * 0.5f;
+        const float mids = (m_sound.imm[0][1] + m_sound.imm[1][1]) * 0.5f;
+        const float treble = (m_sound.imm[0][2] + m_sound.imm[1][2]) * 0.5f;
+        auto clean = [](float value, float fallback) {
+            return _finite(value) ? value : fallback;
+        };
+
+        m_lpDX->DrawWaveform(m_sound.fWaveform[0].data(),
+                             m_sound.fWaveform[1].data(),
+                             NUM_AUDIO_BUFFER_SAMPLES,
+                             bass,
+                             mids,
+                             treble,
+                             clean(m_pState->m_fWaveR.eval(time), 0.35f),
+                             clean(m_pState->m_fWaveG.eval(time), 0.85f),
+                             clean(m_pState->m_fWaveB.eval(time), 1.0f),
+                             clean(m_pState->m_fWaveAlpha.eval(time), 1.0f),
+                             clean(m_pState->m_fWaveScale.eval(time), 1.0f),
+                             clean(m_pState->m_fWaveX.eval(time), 0.5f),
+                             clean(m_pState->m_fWaveY.eval(time), 0.5f),
+                             clean(m_pState->m_fDecay.eval(time), 0.97f),
+                             clean(m_pState->m_fZoom.eval(time), 1.0f),
+                             clean(m_pState->m_fRot.eval(time), 0.0f));
+
+        if (!redraw)
+        {
+            m_nFramesSinceResize++;
+            if (m_nLoadingPreset > 0)
+                LoadPresetTick();
+        }
+
+        LeaveCriticalSection(&g_cs);
+        return;
     }
 
     // 2. Clear the background.
@@ -5376,6 +5512,9 @@ void CPlugin::GenPlasma(int x0, int x1, int y0, int y1, float dt)
 
 void CPlugin::LoadPreset(const wchar_t* szPresetFilename, float fBlendTime)
 {
+    if (IsD3D12Mode())
+        fBlendTime = 0.0f;
+
     OutputDebugString(szPresetFilename);
     //OutputDebugString(L"\n");
     // Clear old error message.
@@ -5452,7 +5591,10 @@ void CPlugin::LoadPreset(const wchar_t* szPresetFilename, float fBlendTime)
         m_OldShaders = m_shaders;
         ZeroMemory(&m_shaders, sizeof(PShaderSet));
 
-        LoadShaders(&m_shaders, m_pState, false);
+        if (!IsD3D12Mode())
+            LoadShaders(&m_shaders, m_pState, false);
+        else
+            SelectD3D12PresetTexture();
 
         OnFinishedLoadingPreset();
     }

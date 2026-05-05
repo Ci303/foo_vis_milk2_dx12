@@ -372,6 +372,7 @@ class CPlugin : public CPluginShell
     bool RecompileVShader(const char* szShadersText, VShaderInfo* si, int shaderType, bool bHardErrors);
     bool RecompilePShader(const char* szShadersText, PShaderInfo* si, int shaderType, bool bHardErrors, int PSVersion);
     bool EvictSomeTexture();
+    bool SelectD3D12PresetTexture();
     typedef std::vector<TexInfo> TexInfoList;
     TexInfoList m_textures;
     bool m_bNeedRescanTexturesDir;

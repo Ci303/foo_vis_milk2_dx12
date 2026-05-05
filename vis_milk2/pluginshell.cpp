@@ -70,6 +70,7 @@ TextStyle* CPluginShell::GetFont(eFontIndex idx) { if (idx >= eFontIndex::SIMPLE
 int CPluginShell::GetFontHeight(eFontIndex idx) const { if (idx >= eFontIndex::SIMPLE_FONT  && idx < eFontIndex::EXTRA_5 && idx < NUM_BASIC_FONTS + NUM_EXTRA_FONTS) return m_fontinfo[idx].nSize; else return 0; }
 int CPluginShell::GetBitDepth() const { return m_lpDX->GetBitDepth(); };
 D3D11Shim* CPluginShell::GetDevice() const { return m_lpDX->m_lpDevice.get(); };
+bool CPluginShell::IsD3D12Mode() const { return m_lpDX && m_lpDX->IsD3D12Mode(); }
 
 int CPluginShell::InitNonDX11()
 {
@@ -171,6 +172,9 @@ void CPluginShell::AllocateTextSurface()
 
 int CPluginShell::AllocateDX11()
 {
+    if (m_lpDX && m_lpDX->IsD3D12Mode())
+        return TRUE;
+
     AllocateFonts();
     if (m_fix_slow_text)
         AllocateTextSurface();
@@ -194,6 +198,9 @@ int CPluginShell::AllocateDX11()
 
 void CPluginShell::CleanUpDX11(int final_cleanup)
 {
+    if (m_lpDX && m_lpDX->IsD3D12Mode())
+        return;
+
     // Always unbind the textures before releasing textures,
     // otherwise they might still have a hanging reference!
     if (m_lpDX && m_lpDX->m_lpDevice)
@@ -215,6 +222,9 @@ void CPluginShell::OnWindowSizeChanged(int width, int height)
     {
         return;
     }
+    if (m_lpDX->IsD3D12Mode())
+        return;
+
     if (!AllocateDX11())
     {
         m_lpDX->m_ready = false; // flag to exit
@@ -288,6 +298,8 @@ void CPluginShell::ToggleFullScreen()
         }
         return;
     }
+    if (m_lpDX->IsD3D12Mode())
+        return;
 
     if (!AllocateDX11())
     {
@@ -333,7 +345,10 @@ int CPluginShell::InitDirectX()
         return FALSE;
     }
 
-    m_lpDX->GetDeviceResources()->RegisterDeviceNotify(this);
+    if (!m_lpDX->IsD3D12Mode())
+    {
+        m_lpDX->GetDeviceResources()->RegisterDeviceNotify(this);
+    }
 
     // Initialize graphics.
     if (!m_lpDX->StartOrRestartDevice(&params))
@@ -845,6 +860,13 @@ int CPluginShell::PluginRender(float* pWaveL, float* pWaveR)
 
 void CPluginShell::DrawAndDisplay(int redraw)
 {
+    if (m_lpDX->IsD3D12Mode())
+    {
+        MilkDropRenderFrame(redraw);
+        m_lpDX->Show();
+        return;
+    }
+
     int cx = m_lpDX->m_client_width;
     int cy = m_lpDX->m_client_height;
     m_upper_left_corner_y = TEXT_MARGIN + GetCanvasMarginY();
@@ -1669,6 +1691,9 @@ void CPluginShell::AlignWaves()
 // Notifies renderers that device resources need to be released.
 void CPluginShell::OnDeviceLost()
 {
+    if (m_lpDX->IsD3D12Mode())
+        return;
+
     CleanUpDX11(TRUE);
 
     m_lpDX->m_lpDevice.reset();
@@ -1677,6 +1702,9 @@ void CPluginShell::OnDeviceLost()
 // Notifies renderers that device resources may now be re-created.
 void CPluginShell::OnDeviceRestored()
 {
+    if (m_lpDX->IsD3D12Mode())
+        return;
+
     m_lpDX->CreateDeviceDependentResources();
 
     m_lpDX->CreateWindowSizeDependentResources();

@@ -35,7 +35,6 @@
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
-#include <timeapi.h>
 
 #include <d3d11_1.h> // Windows 8 and Platform Update for Windows 7 [desktop apps | UWP apps]
 #include <dxgi1_6.h> // Windows 10, version 1803 [desktop apps only]
