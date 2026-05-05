@@ -99,7 +99,7 @@ The recommended test workflow is a separate portable foobar2000 install, not a l
 Example local layout used during development:
 
 ```text
-C:\Users\noswi\Desktop\foobar2000-portable-dx12-dev\
+%USERPROFILE%\Desktop\foobar2000-portable-dx12-dev\
 ```
 
 Install the built DLL to the portable component folder:
@@ -112,13 +112,13 @@ Launch the portable build with DX12 mode enabled:
 
 ```powershell
 $env:FOO_VIS_MILK2_DX12_DEV = "1"
-Start-Process "C:\Users\noswi\Desktop\foobar2000-portable-dx12-dev\foobar2000.exe" -WorkingDirectory "C:\Users\noswi\Desktop\foobar2000-portable-dx12-dev"
+Start-Process "$env:USERPROFILE\Desktop\foobar2000-portable-dx12-dev\foobar2000.exe" -WorkingDirectory "$env:USERPROFILE\Desktop\foobar2000-portable-dx12-dev"
 ```
 
 During development, this has been launched through:
 
 ```text
-C:\Users\noswi\Desktop\foobar2000-portable-dx12-dev\Launch DX12 dev portable.ps1
+%USERPROFILE%\Desktop\foobar2000-portable-dx12-dev\Launch DX12 dev portable.ps1
 ```
 
 ## Presets And Textures
