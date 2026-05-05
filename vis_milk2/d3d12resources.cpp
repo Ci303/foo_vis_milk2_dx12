@@ -192,6 +192,7 @@ void D3D12Resources::SetTextureDirectory(const wchar_t* textureDirectory)
 
     if (m_d3dDevice && m_commandQueue)
     {
+        RefreshTextureFileList();
         const std::wstring textureFile = PickTextureFile();
         if (!textureFile.empty())
         {
@@ -297,6 +298,8 @@ void D3D12Resources::DrawWaveform(const float* left,
             vertex.color[3] = std::clamp(waveA, 0.05f, 1.0f);
         }
     }
+
+    MaybeCycleTexture();
 
     ThrowIfFailed(m_commandAllocators[m_frameIndex]->Reset());
     ThrowIfFailed(m_commandList->Reset(m_commandAllocators[m_frameIndex].Get(), m_waveformPipelineState.Get()));
@@ -581,13 +584,19 @@ bool D3D12Resources::LoadTextureFromFile(const wchar_t* textureFile)
         return false;
     }
 
-    const wchar_t* ext = wcsrchr(textureFile, L'.');
-    if (ext && !_wcsicmp(ext, L".tga"))
+    if (!_wcsicmp(m_currentTextureFile.c_str(), textureFile))
     {
-        return LoadTextureFromTga(textureFile);
+        return true;
     }
 
-    return LoadTextureFromWic(textureFile);
+    const wchar_t* ext = wcsrchr(textureFile, L'.');
+    const bool loaded = ext && !_wcsicmp(ext, L".tga") ? LoadTextureFromTga(textureFile) : LoadTextureFromWic(textureFile);
+    if (loaded)
+    {
+        m_currentTextureFile = textureFile;
+        OutputDebugStringW((std::wstring(L"foo_vis_milk2 DX12 texture loaded: ") + textureFile + L"\n").c_str());
+    }
+    return loaded;
 }
 
 bool D3D12Resources::LoadTextureFromWic(const wchar_t* textureFile)
@@ -834,6 +843,87 @@ bool D3D12Resources::UploadTextureRGBA(UINT width, UINT height, const std::vecto
     srvDesc.Texture2D.MipLevels = 1;
     m_d3dDevice->CreateShaderResourceView(m_texture.Get(), &srvDesc, m_srvHeap->GetCPUDescriptorHandleForHeapStart());
     return true;
+}
+
+void D3D12Resources::RefreshTextureFileList()
+{
+    static constexpr const wchar_t* masks[] = {L"*.jpg", L"*.jpeg", L"*.png", L"*.bmp", L"*.gif", L"*.jfif", L"*.dds", L"*.tga"};
+    m_textureFiles.clear();
+    m_textureCycleIndex = 0;
+
+    if (m_textureDirectory.empty())
+    {
+        return;
+    }
+
+    for (const wchar_t* mask : masks)
+    {
+        WIN32_FIND_DATAW findData{};
+        const std::wstring query = m_textureDirectory + mask;
+        HANDLE find = FindFirstFileW(query.c_str(), &findData);
+        if (find == INVALID_HANDLE_VALUE)
+        {
+            continue;
+        }
+
+        do
+        {
+            if ((findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0)
+            {
+                m_textureFiles.push_back(m_textureDirectory + findData.cFileName);
+            }
+        } while (FindNextFileW(find, &findData));
+
+        FindClose(find);
+    }
+}
+
+bool D3D12Resources::IsTextureCyclingEnabled() const
+{
+    wchar_t value[8]{};
+    return GetEnvironmentVariableW(L"FOO_VIS_MILK2_DX12_TEXTURE_CYCLE", value, static_cast<DWORD>(std::size(value))) > 0 && wcscmp(value, L"0") != 0;
+}
+
+DWORD D3D12Resources::GetTextureCycleIntervalMs() const
+{
+    wchar_t value[16]{};
+    if (GetEnvironmentVariableW(L"FOO_VIS_MILK2_DX12_TEXTURE_CYCLE_MS", value, static_cast<DWORD>(std::size(value))) > 0)
+    {
+        wchar_t* end = nullptr;
+        const unsigned long parsed = wcstoul(value, &end, 10);
+        if (end && *end == 0 && parsed >= 500 && parsed <= 60000)
+        {
+            return static_cast<DWORD>(parsed);
+        }
+    }
+
+    return 3000;
+}
+
+void D3D12Resources::MaybeCycleTexture()
+{
+    if (!IsTextureCyclingEnabled() || m_textureFiles.empty())
+    {
+        return;
+    }
+
+    const ULONGLONG now = GetTickCount64();
+    if (m_lastTextureCycleTick != 0 && now - m_lastTextureCycleTick < GetTextureCycleIntervalMs())
+    {
+        return;
+    }
+
+    m_lastTextureCycleTick = now;
+    const size_t attempts = m_textureFiles.size();
+    for (size_t i = 0; i < attempts; ++i)
+    {
+        const std::wstring textureFile = m_textureFiles[m_textureCycleIndex % m_textureFiles.size()];
+        ++m_textureCycleIndex;
+        if (LoadTextureFromFile(textureFile.c_str()))
+        {
+            return;
+        }
+    }
 }
 
 std::wstring D3D12Resources::PickTextureFile() const

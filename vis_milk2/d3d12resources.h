@@ -64,6 +64,10 @@ class D3D12Resources
     bool LoadTextureFromWic(const wchar_t* textureFile);
     bool LoadTextureFromTga(const wchar_t* textureFile);
     bool UploadTextureRGBA(UINT width, UINT height, const std::vector<uint8_t>& pixels);
+    void RefreshTextureFileList();
+    bool IsTextureCyclingEnabled() const;
+    DWORD GetTextureCycleIntervalMs() const;
+    void MaybeCycleTexture();
     std::wstring PickTextureFile() const;
     void DrawTextureQuad();
 
@@ -113,6 +117,10 @@ class D3D12Resources
     D3D12_VERTEX_BUFFER_VIEW m_textureVertexBufferView{};
     TextureVertex* m_mappedTextureVertices = nullptr;
     std::wstring m_textureDirectory;
+    std::wstring m_currentTextureFile;
+    std::vector<std::wstring> m_textureFiles;
+    size_t m_textureCycleIndex = 0;
+    ULONGLONG m_lastTextureCycleTick = 0;
     Microsoft::WRL::ComPtr<ID3D12Fence> m_fence;
     UINT64 m_fenceValues[c_maxBackBufferCount]{};
     HANDLE m_fenceEvent = nullptr;
