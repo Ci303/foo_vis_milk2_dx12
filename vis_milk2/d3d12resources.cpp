@@ -7,6 +7,7 @@
 #include "deviceresources.h"
 
 #include <wincodec.h>
+#include <fstream>
 
 using Microsoft::WRL::ComPtr;
 
@@ -580,6 +581,17 @@ bool D3D12Resources::LoadTextureFromFile(const wchar_t* textureFile)
         return false;
     }
 
+    const wchar_t* ext = wcsrchr(textureFile, L'.');
+    if (ext && !_wcsicmp(ext, L".tga"))
+    {
+        return LoadTextureFromTga(textureFile);
+    }
+
+    return LoadTextureFromWic(textureFile);
+}
+
+bool D3D12Resources::LoadTextureFromWic(const wchar_t* textureFile)
+{
     ComPtr<IWICImagingFactory> factory;
     HRESULT hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(factory.GetAddressOf()));
     if (FAILED(hr))
@@ -617,6 +629,126 @@ bool D3D12Resources::LoadTextureFromFile(const wchar_t* textureFile)
     const UINT rowPitch = width * bytesPerPixel;
     std::vector<uint8_t> pixels(static_cast<size_t>(rowPitch) * height);
     ThrowIfFailed(converter->CopyPixels(nullptr, rowPitch, static_cast<UINT>(pixels.size()), pixels.data()));
+
+    return UploadTextureRGBA(width, height, pixels);
+}
+
+bool D3D12Resources::LoadTextureFromTga(const wchar_t* textureFile)
+{
+    std::ifstream file(textureFile, std::ios::binary);
+    if (!file)
+    {
+        return false;
+    }
+
+    uint8_t header[18]{};
+    file.read(reinterpret_cast<char*>(header), sizeof(header));
+    if (!file)
+    {
+        return false;
+    }
+
+    const uint8_t idLength = header[0];
+    const uint8_t colorMapType = header[1];
+    const uint8_t imageType = header[2];
+    const UINT width = static_cast<UINT>(header[12] | (header[13] << 8));
+    const UINT height = static_cast<UINT>(header[14] | (header[15] << 8));
+    const uint8_t bitsPerPixel = header[16];
+    const uint8_t descriptor = header[17];
+    const bool rle = imageType == 10;
+    const bool trueColor = imageType == 2 || imageType == 10;
+    const bool grayscale = imageType == 3;
+    if (colorMapType != 0 || width == 0 || height == 0 || (!trueColor && !grayscale) || (bitsPerPixel != 8 && bitsPerPixel != 24 && bitsPerPixel != 32))
+    {
+        return false;
+    }
+
+    if (idLength > 0)
+    {
+        file.seekg(idLength, std::ios::cur);
+        if (!file)
+        {
+            return false;
+        }
+    }
+
+    std::vector<uint8_t> pixels(static_cast<size_t>(width) * height * 4);
+    const UINT bytesPerPixel = bitsPerPixel / 8;
+    const bool topOrigin = (descriptor & 0x20) != 0;
+    const bool rightOrigin = (descriptor & 0x10) != 0;
+
+    auto writePixel = [&](UINT index, const uint8_t* source) {
+        const UINT srcX = index % width;
+        const UINT srcY = index / width;
+        const UINT dstX = rightOrigin ? (width - 1 - srcX) : srcX;
+        const UINT dstY = topOrigin ? srcY : (height - 1 - srcY);
+        uint8_t* dest = pixels.data() + (static_cast<size_t>(dstY) * width + dstX) * 4;
+        if (bitsPerPixel == 8)
+        {
+            dest[0] = source[0];
+            dest[1] = source[0];
+            dest[2] = source[0];
+            dest[3] = 255;
+        }
+        else
+        {
+            dest[0] = source[2];
+            dest[1] = source[1];
+            dest[2] = source[0];
+            dest[3] = bitsPerPixel == 32 ? source[3] : 255;
+        }
+    };
+
+    UINT pixelIndex = 0;
+    std::array<uint8_t, 4> pixel{};
+    if (rle)
+    {
+        while (pixelIndex < width * height && file)
+        {
+            uint8_t packetHeader = 0;
+            file.read(reinterpret_cast<char*>(&packetHeader), 1);
+            const UINT packetCount = (packetHeader & 0x7f) + 1;
+            if (packetHeader & 0x80)
+            {
+                file.read(reinterpret_cast<char*>(pixel.data()), bytesPerPixel);
+                for (UINT i = 0; i < packetCount && pixelIndex < width * height; ++i)
+                {
+                    writePixel(pixelIndex++, pixel.data());
+                }
+            }
+            else
+            {
+                for (UINT i = 0; i < packetCount && pixelIndex < width * height; ++i)
+                {
+                    file.read(reinterpret_cast<char*>(pixel.data()), bytesPerPixel);
+                    writePixel(pixelIndex++, pixel.data());
+                }
+            }
+        }
+    }
+    else
+    {
+        while (pixelIndex < width * height && file)
+        {
+            file.read(reinterpret_cast<char*>(pixel.data()), bytesPerPixel);
+            writePixel(pixelIndex++, pixel.data());
+        }
+    }
+
+    if (pixelIndex != width * height)
+    {
+        return false;
+    }
+
+    return UploadTextureRGBA(width, height, pixels);
+}
+
+bool D3D12Resources::UploadTextureRGBA(UINT width, UINT height, const std::vector<uint8_t>& pixels)
+{
+    if (width == 0 || height == 0 || pixels.size() < static_cast<size_t>(width) * height * 4)
+    {
+        return false;
+    }
 
     D3D12_RESOURCE_DESC textureDesc{};
     textureDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
@@ -662,9 +794,10 @@ bool D3D12Resources::LoadTextureFromFile(const wchar_t* textureFile)
 
     uint8_t* mapped = nullptr;
     ThrowIfFailed(m_textureUploadBuffer->Map(0, nullptr, reinterpret_cast<void**>(&mapped)));
+    const UINT sourceRowPitch = width * 4;
     for (UINT row = 0; row < height; ++row)
     {
-        memcpy(mapped + layout.Offset + static_cast<size_t>(row) * layout.Footprint.RowPitch, pixels.data() + static_cast<size_t>(row) * rowPitch, rowPitch);
+        memcpy(mapped + layout.Offset + static_cast<size_t>(row) * layout.Footprint.RowPitch, pixels.data() + static_cast<size_t>(row) * sourceRowPitch, sourceRowPitch);
     }
     m_textureUploadBuffer->Unmap(0, nullptr);
 
@@ -705,7 +838,7 @@ bool D3D12Resources::LoadTextureFromFile(const wchar_t* textureFile)
 
 std::wstring D3D12Resources::PickTextureFile() const
 {
-    static constexpr const wchar_t* masks[] = {L"*.jpg", L"*.jpeg", L"*.png", L"*.bmp", L"*.gif", L"*.jfif"};
+    static constexpr const wchar_t* masks[] = {L"*.jpg", L"*.jpeg", L"*.png", L"*.bmp", L"*.gif", L"*.jfif", L"*.dds", L"*.tga"};
     if (m_textureDirectory.empty())
     {
         return {};

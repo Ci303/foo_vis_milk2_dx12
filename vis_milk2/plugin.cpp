@@ -2420,7 +2420,7 @@ bool CPlugin::SelectD3D12PresetTexture()
         }
     }
 
-    static constexpr const wchar_t* d3d12TextureExts[] = {L"jpg", L"jpeg", L"png", L"bmp", L"gif", L"jfif"};
+    static constexpr const wchar_t* d3d12TextureExts[] = {L"jpg", L"jpeg", L"png", L"bmp", L"gif", L"jfif", L"dds", L"tga"};
     wchar_t filename[MAX_PATH]{};
     for (const wchar_t* ext : d3d12TextureExts)
     {

@@ -61,6 +61,9 @@ class D3D12Resources
     void CreateWaveformResources();
     void CreateTextureResources();
     bool LoadTextureFromFile(const wchar_t* textureFile);
+    bool LoadTextureFromWic(const wchar_t* textureFile);
+    bool LoadTextureFromTga(const wchar_t* textureFile);
+    bool UploadTextureRGBA(UINT width, UINT height, const std::vector<uint8_t>& pixels);
     std::wstring PickTextureFile() const;
     void DrawTextureQuad();
 

@@ -143,8 +143,13 @@ The current DX12 texture loader supports WIC-backed formats:
 - `bmp`
 - `gif`
 - `jfif`
+- `dds` where a Windows WIC DDS decoder can decode the file
 
-DDS and TGA are present in many MilkDrop packs, but DX12 loading for those formats is not implemented yet.
+It also includes a native loader for common uncompressed and RLE true-color TGA files:
+
+- `tga`
+
+Some DDS/TGA variants may still fail if they use compression or pixel formats outside those currently decoded paths.
 
 ## Safety Notes
 
