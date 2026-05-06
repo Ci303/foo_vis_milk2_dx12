@@ -14,6 +14,62 @@
 
 namespace DX
 {
+struct CustomShapeDrawCommand
+{
+    int sides = 0;
+    bool additive = false;
+    bool thickBorder = false;
+    bool textured = false;
+    float x = 0.5f;
+    float y = 0.5f;
+    float radius = 0.0f;
+    float angle = 0.0f;
+    float texZoom = 1.0f;
+    float texAngle = 0.0f;
+    float r = 1.0f;
+    float g = 1.0f;
+    float b = 1.0f;
+    float a = 0.0f;
+    float r2 = 1.0f;
+    float g2 = 1.0f;
+    float b2 = 1.0f;
+    float a2 = 0.0f;
+    float borderR = 1.0f;
+    float borderG = 1.0f;
+    float borderB = 1.0f;
+    float borderA = 0.0f;
+};
+
+struct CustomWaveVertex
+{
+    float x = 0.0f;
+    float y = 0.0f;
+    float r = 1.0f;
+    float g = 1.0f;
+    float b = 1.0f;
+    float a = 1.0f;
+};
+
+struct CustomWaveDrawCommand
+{
+    size_t vertexOffset = 0;
+    size_t vertexCount = 0;
+    bool additive = false;
+    bool triangleList = false;
+};
+
+struct TextureWarpVertex
+{
+    float x = 0.0f;
+    float y = 0.0f;
+    float u = 0.0f;
+    float v = 0.0f;
+    float r = 1.0f;
+    float g = 1.0f;
+    float b = 1.0f;
+    float a = 1.0f;
+};
+
 class D3D12Resources
 {
   public:
@@ -46,7 +102,57 @@ class D3D12Resources
                       float waveY = 0.5f,
                       float decay = 0.97f,
                       float zoom = 1.0f,
-                      float rot = 0.0f);
+                      float rot = 0.0f,
+                      float motionCenterX = 0.5f,
+                      float motionCenterY = 0.5f,
+                      float motionDX = 0.0f,
+                      float motionDY = 0.0f,
+                      float motionStretchX = 1.0f,
+                      float motionStretchY = 1.0f,
+                      float motionWarp = 0.0f,
+                      float echoAlpha = 0.0f,
+                      float echoZoom = 2.0f,
+                      int echoOrientation = 0,
+                      bool waveUseDots = false,
+                      bool waveThick = false,
+                      bool waveAdditive = false,
+                      bool waveBrighten = false,
+                      int waveMode = 0,
+                      float waveParam = 0.0f,
+                      bool darkenCenter = false,
+                      float postGamma = 1.0f,
+                      bool postInvert = false,
+                      bool postBrighten = false,
+                      bool postDarken = false,
+                      bool postSolarize = false,
+                      float postShaderAmount = 0.0f,
+                      float outerBorderSize = 0.0f,
+                      float outerBorderR = 0.0f,
+                      float outerBorderG = 0.0f,
+                      float outerBorderB = 0.0f,
+                      float outerBorderA = 0.0f,
+                      float innerBorderSize = 0.0f,
+                      float innerBorderR = 0.0f,
+                      float innerBorderG = 0.0f,
+                      float innerBorderB = 0.0f,
+                      float innerBorderA = 0.0f,
+                      float motionVectorX = 0.0f,
+                      float motionVectorY = 0.0f,
+                      float motionVectorDX = 0.0f,
+                      float motionVectorDY = 0.0f,
+                      float motionVectorLength = 0.0f,
+                      float motionVectorR = 0.0f,
+                      float motionVectorG = 0.0f,
+                      float motionVectorB = 0.0f,
+                      float motionVectorA = 0.0f,
+                      const CustomShapeDrawCommand* customShapes = nullptr,
+                      size_t customShapeCount = 0,
+                      const CustomWaveVertex* customWaveVertices = nullptr,
+                      size_t customWaveVertexCount = 0,
+                      const CustomWaveDrawCommand* customWaveDraws = nullptr,
+                      size_t customWaveDrawCount = 0,
+                      const TextureWarpVertex* textureWarpVertices = nullptr,
+                      size_t textureWarpVertexCount = 0);
     void Present();
 
     RECT GetOutputSize() const noexcept { return m_outputSize; }
@@ -60,19 +166,78 @@ class D3D12Resources
     D3D12_CPU_DESCRIPTOR_HANDLE GetCurrentRenderTargetView() const noexcept;
     void CreateWaveformResources();
     void CreateTextureResources();
+    void CreatePostProcessResources();
+    void CreatePostProcessTexture();
     bool LoadTextureFromFile(const wchar_t* textureFile);
     bool LoadTextureFromWic(const wchar_t* textureFile);
     bool LoadTextureFromTga(const wchar_t* textureFile);
     bool UploadTextureRGBA(UINT width, UINT height, const std::vector<uint8_t>& pixels);
     void RefreshTextureFileList();
+    bool IsPostProcessEnabled() const;
     bool IsTextureCyclingEnabled() const;
     DWORD GetTextureCycleIntervalMs() const;
     void MaybeCycleTexture();
+    void CreateFeedbackResources();
+    void CopyBackBufferToFeedback(UINT feedbackIndex);
+    bool CopyBackBufferToPostProcessSource();
     std::wstring PickTextureFile() const;
-    void DrawTextureQuad();
+    void DrawTextureQuad(float bass,
+                         float mids,
+                         float treble,
+                         float decay,
+                         float zoom,
+                         float rot,
+                         float motionCenterX,
+                         float motionCenterY,
+                         float motionDX,
+                         float motionDY,
+                         float motionStretchX,
+                         float motionStretchY,
+                         float motionWarp);
+    void DrawTextureQuadFromSrv(D3D12_GPU_DESCRIPTOR_HANDLE srvHandle,
+                                ID3D12DescriptorHeap* descriptorHeap,
+                                float bass,
+                                float mids,
+                                float treble,
+                                float decay,
+                                float zoom,
+                                float rot,
+                                float alphaScale,
+                                float zoomBias,
+                                float angleBias,
+                                bool flipU,
+                                bool flipV,
+                                float motionCenterX,
+                                float motionCenterY,
+                                float motionDX,
+                                float motionDY,
+                                float motionStretchX,
+                                float motionStretchY,
+                                float motionWarp);
+    void DrawTexturedCustomShapesFromSrv(D3D12_GPU_DESCRIPTOR_HANDLE srvHandle,
+                                         ID3D12DescriptorHeap* descriptorHeap,
+                                         const CustomShapeDrawCommand* customShapes,
+                                         size_t customShapeCount);
+    void DrawTextureMeshFromSrv(D3D12_GPU_DESCRIPTOR_HANDLE srvHandle,
+                                ID3D12DescriptorHeap* descriptorHeap,
+                                const TextureWarpVertex* vertices,
+                                size_t vertexCount,
+                                float bass,
+                                float mids,
+                                float treble,
+                                float decay);
+    void DrawPostProcessFromSrv(D3D12_GPU_DESCRIPTOR_HANDLE srvHandle,
+                                ID3D12DescriptorHeap* descriptorHeap,
+                                float gamma,
+                                bool brighten,
+                                bool darken,
+                                bool solarize,
+                                bool invert,
+                                float shaderAmount);
 
     static constexpr UINT c_maxBackBufferCount = 3;
-    static constexpr UINT c_maxWaveformVertices = 2048;
+    static constexpr UINT c_maxWaveformVertices = 65536;
+    static constexpr UINT c_maxTextureVertices = 32768;
 
     struct WaveformVertex
     {
@@ -105,17 +270,32 @@ class D3D12Resources
     Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> m_commandList;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> m_waveformRootSignature;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_waveformPipelineState;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_waveformAdditivePipelineState;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_solidPipelineState;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_solidAdditivePipelineState;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_waveformVertexBuffer;
     D3D12_VERTEX_BUFFER_VIEW m_waveformVertexBufferView{};
     WaveformVertex* m_mappedWaveformVertices = nullptr;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_srvHeap;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> m_textureRootSignature;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_texturePipelineState;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_textureAlphaPipelineState;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_textureAdditivePipelineState;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_textureVertexBuffer;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_texture;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_textureUploadBuffer;
     D3D12_VERTEX_BUFFER_VIEW m_textureVertexBufferView{};
     TextureVertex* m_mappedTextureVertices = nullptr;
+    UINT m_textureVertexCursor = 0;
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_postProcessSrvHeap;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> m_postProcessRootSignature;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_postProcessPipelineState;
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_postProcessTexture;
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_feedbackSrvHeap;
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_feedbackTextures[2];
+    UINT m_feedbackSrvDescriptorSize = 0;
+    UINT m_feedbackIndex = 0;
+    bool m_feedbackReady[2]{};
     std::wstring m_textureDirectory;
     std::wstring m_currentTextureFile;
     std::vector<std::wstring> m_textureFiles;

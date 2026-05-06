@@ -14,30 +14,43 @@ $env:FOO_VIS_MILK2_DX12_DEV = "1"
 
 Without that variable, the component follows the existing DirectX 11 path.
 
+Optional DX12 development flags used during portable testing:
+
+```powershell
+$env:FOO_VIS_MILK2_DX12_TEXTURE_CYCLE = "1"
+$env:FOO_VIS_MILK2_DX12_TEXTURE_CYCLE_MS = "3000"
+$env:FOO_VIS_MILK2_DX12_POSTPROCESS = "1"
+```
+
 The current DX12 development path can:
 
 - create a native Direct3D 12 device, command queue, swap chain, descriptor heaps, command lists, fences, root signatures, and pipeline states;
 - present inside the foobar2000 hosted visualization element;
 - render beat-responsive waveform lines using native D3D12;
 - import `.milk` preset state without invoking the old D3D11 shader compile path;
-- drive DX12 waveform color, alpha, scale, position, decay, zoom, and rotation from imported preset values;
-- load a texture from `milkdrop2\textures` through a native D3D12 SRV path;
-- draw a blended texture-backed background behind the waveform;
+- drive DX12 waveform color, alpha, scale, position, decay, zoom, rotation, mode, mystery/param, dots, thick, additive, and brighten/maximize controls from imported preset values;
+- load WIC, DDS, and TGA textures from `milkdrop2\textures` through native D3D12 SRV paths;
+- draw blended texture-backed visuals behind the waveform;
+- cycle texture-backed visuals during portable testing;
 - parse preset `sampler_*` texture requests and try to load matching texture-pack files;
-- support random texture requests such as `sampler_rand00_prefix` for WIC-backed formats.
+- support random texture requests such as `sampler_rand00_prefix`;
+- render native D3D12 feedback/trails, preset echo controls, darken-center, borders, motion vectors, custom shapes, and custom waves;
+- run preset per-frame equations on the DX12 path;
+- apply an experimental texture/feedback warp mesh from the MilkDrop per-pixel grid;
+- apply an experimental postprocess pass for gamma, brighten, darken, solarize, invert, and first `fShader` approximation when `FOO_VIS_MILK2_DX12_POSTPROCESS=1`.
 
-The current DX12 path is still incomplete. It does not yet provide full MilkDrop rendering parity.
+The current DX12 path is still incomplete. It does not yet provide full MilkDrop rendering parity and should be treated as active renderer development.
 
 ## What Is Not Finished
 
 The following areas still need renderer work:
 
-- full MilkDrop warp/composite shader execution on D3D12;
+- full MilkDrop warp/composite shader parity on D3D12;
 - full shader reflection and resource binding replacement for the old D3D11 constant-table path;
-- render-to-texture feedback, blur chain, and video echo in native D3D12;
-- all MilkDrop shape, border, motion vector, custom wave, and sprite rendering paths;
+- complete render-to-texture feedback, blur chain, and video echo parity;
+- complete MilkDrop shape, border, motion vector, custom wave, and sprite rendering parity;
 - DirectWrite/Direct2D text rendering in the DX12 path;
-- DDS and TGA texture loading in the DX12 path;
+- compressed and less common DDS/TGA texture variants;
 - multi-texture preset sampler binding beyond the current first usable texture selection;
 - feature parity with the current working live DX11 component.
 
@@ -154,6 +167,8 @@ Some DDS/TGA variants may still fail if they use compression or pixel formats ou
 ## Safety Notes
 
 Do not test this by replacing a working live foobar2000 install unless you have a backup and intentionally want to test the experimental component there.
+
+The current postprocess and texture/feedback warp work is experimental. It may introduce visual artifacting during portable testing, including possible desktop or compositor artifacts outside the foobar2000 window. If that happens, disable `FOO_VIS_MILK2_DX12_POSTPROCESS`, use the safe portable launcher, or restart the affected process/session before continuing.
 
 The current recommended workflow is:
 

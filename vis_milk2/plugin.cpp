@@ -3484,16 +3484,378 @@ void CPlugin::MilkDropRenderFrame(int redraw)
 
     if (IsD3D12Mode())
     {
+        const float fps = GetFps();
+        const float fDeltaT = (fps > 0.001f) ? (1.0f / fps) : (1.0f / 30.0f);
+
+        if (GetFrame() == 0)
+        {
+            m_fStartTime = GetTime();
+            m_fPresetStartTime = GetTime();
+        }
+
+        if (m_fNextPresetTime < 0.0f)
+        {
+            const float dt = m_fTimeBetweenPresetsRand * (warand() % 1000) * 0.001f;
+            m_fNextPresetTime = GetTime() + m_fBlendTimeAuto + m_fTimeBetweenPresets + dt;
+        }
+
+        if (m_bPresetLockedByUser || m_bPresetLockedByCode)
+        {
+            m_fPresetStartTime += fDeltaT;
+            m_fNextPresetTime += fDeltaT;
+        }
+
         if (!redraw)
+        {
             DoCustomSoundAnalysis();
 
-        const float time = GetTime();
+            m_rand_frame = XMFLOAT4(FRAND, FRAND, FRAND, FRAND);
+
+            if (m_fNextPresetTime < GetTime() && m_nLoadingPreset == 0)
+                LoadRandomPreset(m_fBlendTimeAuto);
+
+            if (m_pState->m_bBlending)
+            {
+                m_pState->m_fBlendProgress = (GetTime() - m_pState->m_fBlendStartTime) / m_pState->m_fBlendDuration;
+                if (m_pState->m_fBlendProgress > 1.0f)
+                    m_pState->m_bBlending = false;
+            }
+
+            if (GetFrame() == 0)
+                m_fHardCutThresh = m_fHardCutLoudnessThresh * 2.0f;
+            if (fps > 1.0f && !m_bHardCutsDisabled && !m_bPresetLockedByUser && !m_bPresetLockedByCode)
+            {
+                if (mdsound.imm_rel[0] + mdsound.imm_rel[1] + mdsound.imm_rel[2] > m_fHardCutThresh * 3.0f)
+                {
+                    if (m_nLoadingPreset == 0)
+                        LoadRandomPreset(0.0f);
+                    m_fHardCutThresh *= 2.0f;
+                }
+                else
+                {
+                    const float k = -1.3863f / (m_fHardCutHalflife * fps);
+                    const float singleFrameMultiplier = expf(k);
+                    m_fHardCutThresh = (m_fHardCutThresh - m_fHardCutLoudnessThresh) * singleFrameMultiplier + m_fHardCutLoudnessThresh;
+                }
+            }
+        }
+
+        const bool oldPresetUsesWarpShader = (m_pOldState->m_nWarpPSVersion > 0);
+        const bool newPresetUsesWarpShader = (m_pState->m_nWarpPSVersion > 0);
+        const bool oldPresetUsesCompShader = (m_pOldState->m_nCompPSVersion > 0);
+        const bool newPresetUsesCompShader = (m_pState->m_nCompPSVersion > 0);
+        const int code = (oldPresetUsesWarpShader ? 8 : 0) |
+                         (oldPresetUsesCompShader ? 4 : 0) |
+                         (newPresetUsesWarpShader ? 2 : 0) |
+                         (newPresetUsesCompShader ? 1 : 0);
+
+        RunPerFrameEquations(code);
+
         const float bass = (m_sound.imm[0][0] + m_sound.imm[1][0]) * 0.5f;
         const float mids = (m_sound.imm[0][1] + m_sound.imm[1][1]) * 0.5f;
         const float treble = (m_sound.imm[0][2] + m_sound.imm[1][2]) * 0.5f;
-        auto clean = [](float value, float fallback) {
-            return _finite(value) ? value : fallback;
+        auto clean = [](double value, float fallback) -> float {
+            return _finite(value) ? static_cast<float>(value) : fallback;
         };
+
+        std::vector<DX::TextureWarpVertex> textureWarpVertices;
+        if (m_verts && m_vertinfo && m_nGridX > 0 && m_nGridY > 0)
+        {
+            ComputeGridAlphaValues();
+            textureWarpVertices.reserve(static_cast<size_t>(m_nGridX) * static_cast<size_t>(m_nGridY) * 6);
+
+            auto appendTextureWarpVertex = [&](int vertexIndex) {
+                const MDVERTEX& source = m_verts[vertexIndex];
+                DX::TextureWarpVertex vertex{};
+                vertex.x = std::clamp(source.x, -2.0f, 2.0f);
+                vertex.y = std::clamp(-source.y, -2.0f, 2.0f);
+                vertex.u = clean(source.tu, 0.5f);
+                vertex.v = clean(source.tv, 0.5f);
+                vertex.r = 1.0f;
+                vertex.g = 1.0f;
+                vertex.b = 1.0f;
+                vertex.a = 1.0f;
+                textureWarpVertices.push_back(vertex);
+            };
+
+            const int stride = m_nGridX + 1;
+            for (int y = 0; y < m_nGridY; ++y)
+            {
+                for (int x = 0; x < m_nGridX; ++x)
+                {
+                    const int topLeft = y * stride + x;
+                    const int topRight = topLeft + 1;
+                    const int bottomLeft = (y + 1) * stride + x;
+                    const int bottomRight = bottomLeft + 1;
+                    appendTextureWarpVertex(topLeft);
+                    appendTextureWarpVertex(topRight);
+                    appendTextureWarpVertex(bottomLeft);
+                    appendTextureWarpVertex(bottomLeft);
+                    appendTextureWarpVertex(topRight);
+                    appendTextureWarpVertex(bottomRight);
+                }
+            }
+        }
+
+        std::vector<DX::CustomShapeDrawCommand> customShapes;
+        customShapes.reserve(MAX_CUSTOM_SHAPES * 4);
+        const int shapeReps = m_pState->m_bBlending ? 2 : 1;
+        for (int rep = 0; rep < shapeReps; ++rep)
+        {
+            CState* pState = (rep == 0) ? m_pState : m_pOldState;
+            const float alphaMult = shapeReps == 2 ? (rep == 0 ? m_pState->m_fBlendProgress : 1.0f - m_pState->m_fBlendProgress) : 1.0f;
+
+            for (int shapeIndex = 0; shapeIndex < MAX_CUSTOM_SHAPES; ++shapeIndex)
+            {
+                if (!pState->m_shape[shapeIndex].enabled)
+                    continue;
+
+                const int instances = std::clamp(pState->m_shape[shapeIndex].instances, 1, 64);
+                for (int instance = 0; instance < instances; ++instance)
+                {
+                    LoadCustomShapePerFrameEvallibVars(pState, shapeIndex, instance);
+#ifndef _NO_EXPR_
+                    if (pState->m_shape[shapeIndex].m_pf_codehandle)
+                        NSEEL_code_execute(pState->m_shape[shapeIndex].m_pf_codehandle);
+#endif
+
+                    DX::CustomShapeDrawCommand shape{};
+                    shape.sides = std::clamp(static_cast<int>(clean(*pState->m_shape[shapeIndex].var_pf_sides, 4.0f)), 3, 100);
+                    shape.additive = clean(*pState->m_shape[shapeIndex].var_pf_additive, 0.0f) != 0.0f;
+                    shape.thickBorder = clean(*pState->m_shape[shapeIndex].var_pf_thick, 0.0f) != 0.0f;
+                    shape.textured = clean(*pState->m_shape[shapeIndex].var_pf_textured, 0.0f) != 0.0f;
+                    shape.x = clean(*pState->m_shape[shapeIndex].var_pf_x, 0.5f);
+                    shape.y = clean(*pState->m_shape[shapeIndex].var_pf_y, 0.5f);
+                    shape.radius = clean(*pState->m_shape[shapeIndex].var_pf_rad, 0.0f);
+                    shape.angle = clean(*pState->m_shape[shapeIndex].var_pf_ang, 0.0f);
+                    shape.texZoom = clean(*pState->m_shape[shapeIndex].var_pf_tex_zoom, 1.0f);
+                    shape.texAngle = clean(*pState->m_shape[shapeIndex].var_pf_tex_ang, 0.0f);
+                    shape.r = clean(*pState->m_shape[shapeIndex].var_pf_r, 1.0f);
+                    shape.g = clean(*pState->m_shape[shapeIndex].var_pf_g, 1.0f);
+                    shape.b = clean(*pState->m_shape[shapeIndex].var_pf_b, 1.0f);
+                    shape.a = clean(*pState->m_shape[shapeIndex].var_pf_a, 0.0f) * alphaMult;
+                    shape.r2 = clean(*pState->m_shape[shapeIndex].var_pf_r2, 1.0f);
+                    shape.g2 = clean(*pState->m_shape[shapeIndex].var_pf_g2, 1.0f);
+                    shape.b2 = clean(*pState->m_shape[shapeIndex].var_pf_b2, 1.0f);
+                    shape.a2 = clean(*pState->m_shape[shapeIndex].var_pf_a2, 0.0f) * alphaMult;
+                    shape.borderR = clean(*pState->m_shape[shapeIndex].var_pf_border_r, 1.0f);
+                    shape.borderG = clean(*pState->m_shape[shapeIndex].var_pf_border_g, 1.0f);
+                    shape.borderB = clean(*pState->m_shape[shapeIndex].var_pf_border_b, 1.0f);
+                    shape.borderA = clean(*pState->m_shape[shapeIndex].var_pf_border_a, 0.0f) * alphaMult;
+                    customShapes.push_back(shape);
+                }
+            }
+        }
+
+        std::vector<DX::CustomWaveVertex> customWaveVertices;
+        std::vector<DX::CustomWaveDrawCommand> customWaveDraws;
+        customWaveVertices.reserve(MAX_CUSTOM_WAVES * 2048);
+        customWaveDraws.reserve(MAX_CUSTOM_WAVES * 8);
+
+        auto appendCustomWaveDraw = [&](size_t start, size_t count, bool additive, bool triangleList) {
+            if (count == 0)
+                return;
+
+            DX::CustomWaveDrawCommand draw{};
+            draw.vertexOffset = start;
+            draw.vertexCount = count;
+            draw.additive = additive;
+            draw.triangleList = triangleList;
+            customWaveDraws.push_back(draw);
+        };
+
+        auto smoothCustomWave = [](const std::vector<DX::CustomWaveVertex>& input) {
+            std::vector<DX::CustomWaveVertex> output;
+            if (input.size() < 2)
+                return input;
+
+            output.reserve(input.size() * 2);
+            const float c1 = -0.15f;
+            const float c2 = 1.15f;
+            const float c3 = 1.15f;
+            const float c4 = -0.15f;
+            const float invSum = 1.0f / (c1 + c2 + c3 + c4);
+            size_t below = 0;
+            size_t above2 = 1;
+            for (size_t i = 0; i + 1 < input.size(); ++i)
+            {
+                const size_t above = above2;
+                above2 = std::min(input.size() - 1, i + 2);
+                output.push_back(input[i]);
+
+                DX::CustomWaveVertex smoothed = input[i];
+                smoothed.x = (c1 * input[below].x + c2 * input[i].x + c3 * input[above].x + c4 * input[above2].x) * invSum;
+                smoothed.y = (c1 * input[below].y + c2 * input[i].y + c3 * input[above].y + c4 * input[above2].y) * invSum;
+                output.push_back(smoothed);
+                below = i;
+            }
+            output.push_back(input.back());
+            return output;
+        };
+
+        const int customWaveReps = m_pState->m_bBlending ? 2 : 1;
+        for (int rep = 0; rep < customWaveReps; ++rep)
+        {
+            CState* pState = (rep == 0) ? m_pState : m_pOldState;
+            const float alphaMult = customWaveReps == 2 ? (rep == 0 ? m_pState->m_fBlendProgress : 1.0f - m_pState->m_fBlendProgress) : 1.0f;
+
+            for (int waveIndex = 0; waveIndex < MAX_CUSTOM_WAVES; ++waveIndex)
+            {
+                CWave& wave = pState->m_wave[waveIndex];
+                if (!wave.enabled)
+                    continue;
+
+                int sampleLimit = wave.bSpectrum ? 512 : NUM_WAVEFORM_SAMPLES;
+                int samples = std::clamp(wave.samples, 0, sampleLimit);
+                samples -= wave.sep;
+                if (samples < 1)
+                    continue;
+
+                LoadCustomWavePerFrameEvallibVars(pState, waveIndex);
+                *wave.var_pp_time = *wave.var_pf_time;
+                *wave.var_pp_fps = *wave.var_pf_fps;
+                *wave.var_pp_frame = *wave.var_pf_frame;
+                *wave.var_pp_progress = *wave.var_pf_progress;
+                *wave.var_pp_bass = *wave.var_pf_bass;
+                *wave.var_pp_mid = *wave.var_pf_mid;
+                *wave.var_pp_treb = *wave.var_pf_treb;
+                *wave.var_pp_bass_att = *wave.var_pf_bass_att;
+                *wave.var_pp_mid_att = *wave.var_pf_mid_att;
+                *wave.var_pp_treb_att = *wave.var_pf_treb_att;
+
+#ifndef _NO_EXPR_
+                if (wave.m_pf_codehandle)
+                    NSEEL_code_execute(wave.m_pf_codehandle);
+#endif
+
+                for (int vi = 0; vi < NUM_Q_VAR; ++vi)
+                    *wave.var_pp_q[vi] = *wave.var_pf_q[vi];
+                for (int vi = 0; vi < NUM_T_VAR; ++vi)
+                    *wave.var_pp_t[vi] = *wave.var_pf_t[vi];
+
+                samples = std::clamp(static_cast<int>(clean(*wave.var_pf_samples, static_cast<float>(samples))), 0, 512);
+                if ((!wave.bUseDots && samples < 2) || (wave.bUseDots && samples < 1))
+                    continue;
+
+                const int sourceLimit = wave.bSpectrum ? 512 : NUM_WAVEFORM_SAMPLES;
+                const float* source1 = wave.bSpectrum ? m_sound.fSpectrum[0].data() : m_sound.fWaveform[0].data();
+                const float* source2 = wave.bSpectrum ? m_sound.fSpectrum[1].data() : m_sound.fWaveform[1].data();
+                auto sampleSource = [&](const float* source, int index) {
+                    return source[std::clamp(index, 0, sourceLimit - 1)];
+                };
+
+                float temp0[512]{};
+                float temp1[512]{};
+                const float mult = (wave.bSpectrum ? 0.15f : 0.004f) * wave.scaling * pState->m_fWaveScale.eval(-1.0f);
+                const int j0 = wave.bSpectrum ? 0 : (sourceLimit - samples) / 2 - wave.sep / 2;
+                const int j1 = wave.bSpectrum ? 0 : (sourceLimit - samples) / 2 + wave.sep / 2;
+                const float sampleStep = wave.bSpectrum ? (sourceLimit - wave.sep) / static_cast<float>(std::max(samples, 1)) : 1.0f;
+                const float mix1 = powf(std::clamp(wave.smoothing, 0.0f, 1.0f) * 0.98f, 0.5f);
+                const float mix2 = 1.0f - mix1;
+
+                temp0[0] = sampleSource(source1, j0);
+                temp1[0] = sampleSource(source2, j1);
+                for (int sample = 1; sample < samples; ++sample)
+                {
+                    temp0[sample] = sampleSource(source1, static_cast<int>(sample * sampleStep) + j0) * mix2 + temp0[sample - 1] * mix1;
+                    temp1[sample] = sampleSource(source2, static_cast<int>(sample * sampleStep) + j1) * mix2 + temp1[sample - 1] * mix1;
+                }
+                for (int sample = samples - 2; sample >= 0; --sample)
+                {
+                    temp0[sample] = temp0[sample] * mix2 + temp0[sample + 1] * mix1;
+                    temp1[sample] = temp1[sample] * mix2 + temp1[sample + 1] * mix1;
+                }
+                for (int sample = 0; sample < samples; ++sample)
+                {
+                    temp0[sample] *= mult;
+                    temp1[sample] *= mult;
+                }
+
+                std::vector<DX::CustomWaveVertex> wavePoints;
+                wavePoints.reserve(samples);
+                const float sampleDenom = samples > 1 ? 1.0f / static_cast<float>(samples - 1) : 0.0f;
+                for (int sample = 0; sample < samples; ++sample)
+                {
+                    const float sampleT = sample * sampleDenom;
+                    *wave.var_pp_sample = sampleT;
+                    *wave.var_pp_value1 = temp0[sample];
+                    *wave.var_pp_value2 = temp1[sample];
+                    *wave.var_pp_x = 0.5f + temp0[sample];
+                    *wave.var_pp_y = 0.5f + temp1[sample];
+                    *wave.var_pp_r = *wave.var_pf_r;
+                    *wave.var_pp_g = *wave.var_pf_g;
+                    *wave.var_pp_b = *wave.var_pf_b;
+                    *wave.var_pp_a = *wave.var_pf_a;
+
+#ifndef _NO_EXPR_
+                    if (wave.m_pp_codehandle)
+                        NSEEL_code_execute(wave.m_pp_codehandle);
+#endif
+
+                    DX::CustomWaveVertex vertex{};
+                    vertex.x = clean(*wave.var_pp_x, 0.5f) * 2.0f - 1.0f;
+                    vertex.y = clean(*wave.var_pp_y, 0.5f) * -2.0f + 1.0f;
+                    vertex.x *= m_fInvAspectX;
+                    vertex.y *= m_fInvAspectY;
+                    vertex.r = clean(*wave.var_pp_r, 1.0f);
+                    vertex.g = clean(*wave.var_pp_g, 1.0f);
+                    vertex.b = clean(*wave.var_pp_b, 1.0f);
+                    vertex.a = clean(*wave.var_pp_a, 1.0f) * alphaMult;
+                    wavePoints.push_back(vertex);
+                }
+
+                if (wave.bUseDots)
+                {
+                    const float pointSize = static_cast<float>((m_nTexSizeX >= 1024) ? 2 : 1) + (wave.bDrawThick ? 1.0f : 0.0f);
+                    const float dx = pointSize / static_cast<float>(std::max(1, m_nTexSizeX));
+                    const float dy = pointSize / static_cast<float>(std::max(1, m_nTexSizeY));
+                    const size_t start = customWaveVertices.size();
+                    for (const auto& point : wavePoints)
+                    {
+                        DX::CustomWaveVertex v0 = point;
+                        DX::CustomWaveVertex v1 = point;
+                        DX::CustomWaveVertex v2 = point;
+                        DX::CustomWaveVertex v3 = point;
+                        v0.x -= dx; v0.y -= dy;
+                        v1.x += dx; v1.y -= dy;
+                        v2.x += dx; v2.y += dy;
+                        v3.x -= dx; v3.y += dy;
+                        customWaveVertices.push_back(v0);
+                        customWaveVertices.push_back(v1);
+                        customWaveVertices.push_back(v2);
+                        customWaveVertices.push_back(v0);
+                        customWaveVertices.push_back(v2);
+                        customWaveVertices.push_back(v3);
+                    }
+                    appendCustomWaveDraw(start, customWaveVertices.size() - start, wave.bAdditive != 0, true);
+                }
+                else
+                {
+                    std::vector<DX::CustomWaveVertex> linePoints = smoothCustomWave(wavePoints);
+                    const int passes = wave.bDrawThick ? 4 : 1;
+                    const float xInc = 2.0f / static_cast<float>(std::max(1, m_nTexSizeX));
+                    const float yInc = 2.0f / static_cast<float>(std::max(1, m_nTexSizeY));
+                    for (int pass = 0; pass < passes; ++pass)
+                    {
+                        const float offsetX = (pass == 1 || pass == 2) ? xInc : 0.0f;
+                        const float offsetY = (pass == 2 || pass == 3) ? yInc : 0.0f;
+                        const size_t start = customWaveVertices.size();
+                        for (size_t point = 0; point + 1 < linePoints.size(); ++point)
+                        {
+                            DX::CustomWaveVertex a = linePoints[point];
+                            DX::CustomWaveVertex b = linePoints[point + 1];
+                            a.x += offsetX;
+                            a.y += offsetY;
+                            b.x += offsetX;
+                            b.y += offsetY;
+                            customWaveVertices.push_back(a);
+                            customWaveVertices.push_back(b);
+                        }
+                        appendCustomWaveDraw(start, customWaveVertices.size() - start, wave.bAdditive != 0, false);
+                    }
+                }
+            }
+        }
 
         m_lpDX->DrawWaveform(m_sound.fWaveform[0].data(),
                              m_sound.fWaveform[1].data(),
@@ -3501,16 +3863,66 @@ void CPlugin::MilkDropRenderFrame(int redraw)
                              bass,
                              mids,
                              treble,
-                             clean(m_pState->m_fWaveR.eval(time), 0.35f),
-                             clean(m_pState->m_fWaveG.eval(time), 0.85f),
-                             clean(m_pState->m_fWaveB.eval(time), 1.0f),
-                             clean(m_pState->m_fWaveAlpha.eval(time), 1.0f),
-                             clean(m_pState->m_fWaveScale.eval(time), 1.0f),
-                             clean(m_pState->m_fWaveX.eval(time), 0.5f),
-                             clean(m_pState->m_fWaveY.eval(time), 0.5f),
-                             clean(m_pState->m_fDecay.eval(time), 0.97f),
-                             clean(m_pState->m_fZoom.eval(time), 1.0f),
-                             clean(m_pState->m_fRot.eval(time), 0.0f));
+                             clean(*m_pState->var_pf_wave_r, 0.35f),
+                             clean(*m_pState->var_pf_wave_g, 0.85f),
+                             clean(*m_pState->var_pf_wave_b, 1.0f),
+                             clean(*m_pState->var_pf_wave_a, 1.0f),
+                             clean(m_pState->m_fWaveScale.eval(GetTime()), 1.0f),
+                             clean(*m_pState->var_pf_wave_x, 0.5f),
+                             clean(*m_pState->var_pf_wave_y, 0.5f),
+                             clean(*m_pState->var_pf_decay, 0.97f),
+                             clean(*m_pState->var_pf_zoom, 1.0f),
+                             clean(*m_pState->var_pf_rot, 0.0f),
+                             clean(*m_pState->var_pf_cx, 0.5f),
+                             clean(*m_pState->var_pf_cy, 0.5f),
+                             clean(*m_pState->var_pf_dx, 0.0f),
+                             clean(*m_pState->var_pf_dy, 0.0f),
+                             clean(*m_pState->var_pf_sx, 1.0f),
+                             clean(*m_pState->var_pf_sy, 1.0f),
+                             clean(*m_pState->var_pf_warp, 0.0f),
+                             clean(*m_pState->var_pf_echo_alpha, 0.0f),
+                             clean(*m_pState->var_pf_echo_zoom, 2.0f),
+                             static_cast<int>(clean(*m_pState->var_pf_echo_orient, 0.0f)),
+                             clean(*m_pState->var_pf_wave_usedots, 0.0f) > 0.5f,
+                             clean(*m_pState->var_pf_wave_thick, 0.0f) > 0.5f,
+                             clean(*m_pState->var_pf_wave_additive, 0.0f) > 0.5f,
+                             clean(*m_pState->var_pf_wave_brighten, 0.0f) > 0.5f,
+                             static_cast<int>(clean(*m_pState->var_pf_wave_mode, 0.0f)),
+                             clean(*m_pState->var_pf_wave_mystery, 0.0f),
+                             clean(*m_pState->var_pf_darken_center, 0.0f) > 0.5f,
+                             clean(*m_pState->var_pf_gamma, 1.0f),
+                             clean(*m_pState->var_pf_invert, 0.0f) > 0.5f,
+                             clean(*m_pState->var_pf_brighten, 0.0f) > 0.5f,
+                             clean(*m_pState->var_pf_darken, 0.0f) > 0.5f,
+                             clean(*m_pState->var_pf_solarize, 0.0f) > 0.5f,
+                             clean(m_pState->m_fShader.eval(GetTime()), 0.0f),
+                             clean(*m_pState->var_pf_ob_size, 0.0f),
+                             clean(*m_pState->var_pf_ob_r, 0.0f),
+                             clean(*m_pState->var_pf_ob_g, 0.0f),
+                             clean(*m_pState->var_pf_ob_b, 0.0f),
+                             clean(*m_pState->var_pf_ob_a, 0.0f),
+                             clean(*m_pState->var_pf_ib_size, 0.0f),
+                             clean(*m_pState->var_pf_ib_r, 0.0f),
+                             clean(*m_pState->var_pf_ib_g, 0.0f),
+                             clean(*m_pState->var_pf_ib_b, 0.0f),
+                             clean(*m_pState->var_pf_ib_a, 0.0f),
+                             clean(*m_pState->var_pf_mv_x, 0.0f),
+                             clean(*m_pState->var_pf_mv_y, 0.0f),
+                             clean(*m_pState->var_pf_mv_dx, 0.0f),
+                             clean(*m_pState->var_pf_mv_dy, 0.0f),
+                             clean(*m_pState->var_pf_mv_l, 0.0f),
+                             clean(*m_pState->var_pf_mv_r, 0.0f),
+                             clean(*m_pState->var_pf_mv_g, 0.0f),
+                             clean(*m_pState->var_pf_mv_b, 0.0f),
+                             clean(*m_pState->var_pf_mv_a, 0.0f),
+                             customShapes.empty() ? nullptr : customShapes.data(),
+                             customShapes.size(),
+                             customWaveVertices.empty() ? nullptr : customWaveVertices.data(),
+                             customWaveVertices.size(),
+                             customWaveDraws.empty() ? nullptr : customWaveDraws.data(),
+                             customWaveDraws.size(),
+                             textureWarpVertices.empty() ? nullptr : textureWarpVertices.data(),
+                             textureWarpVertices.size());
 
         if (!redraw)
         {
