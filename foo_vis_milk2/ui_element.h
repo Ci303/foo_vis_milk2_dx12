@@ -88,6 +88,7 @@ class milk2_ui_element : public ui_element_instance, public CWindowImpl<milk2_ui
         MESSAGE_HANDLER_EX(WM_IME_NOTIFY, OnImeNotify)
         MESSAGE_HANDLER_EX(WM_QUIT, OnQuit)
         MESSAGE_HANDLER_EX(WM_MILK2, OnMilk2Message)
+        MESSAGE_HANDLER_EX(WM_MILK2_RENDER, OnRenderMessage)
         MESSAGE_HANDLER_EX(WM_CONFIG_CHANGE, OnConfigurationChange)
     END_MSG_MAP()
     // clang-format on
@@ -142,6 +143,7 @@ class milk2_ui_element : public ui_element_instance, public CWindowImpl<milk2_ui
     LRESULT OnImeNotify(UINT uMsg, WPARAM wParam, LPARAM lParam);
     LRESULT OnQuit(UINT uMsg, WPARAM wParam, LPARAM lParam);
     LRESULT OnMilk2Message(UINT uMsg, WPARAM wParam, LPARAM lParam);
+    LRESULT OnRenderMessage(UINT uMsg, WPARAM wParam, LPARAM lParam);
     LRESULT OnConfigurationChange(UINT uMsg, WPARAM wParam, LPARAM lParam);
 
     PWCHAR GetWnd() { swprintf_s(m_szWnd, TEXT("0x%p %dfs %dt"), get_wnd(), s_fullscreen, s_in_toggle); return m_szWnd; }
@@ -229,7 +231,7 @@ class milk2_ui_element : public ui_element_instance, public CWindowImpl<milk2_ui
     const char* ToggleShuffle(bool forward);
 
     // MilkDrop status
-    bool m_milk2;
+    std::atomic_bool m_milk2{false};
     WCHAR m_szWnd[26]; // 26 = 2 ("0x") + 16 (64 / 4 -> 64-bit address in hexadecimal) + 1 ('\0') + 7 (" xfs yt")
     std::wstring m_szBuffer;
 
@@ -244,6 +246,7 @@ class milk2_ui_element : public ui_element_instance, public CWindowImpl<milk2_ui
     void StopTimer() noexcept;
     static VOID CALLBACK TimerCallback(PTP_CALLBACK_INSTANCE Instance, PVOID Context, PTP_TIMER Timer) noexcept;
     PTP_TIMER m_tpTimer;
+    std::atomic_bool m_renderPending{false};
 #endif
 
     // Topmost setting

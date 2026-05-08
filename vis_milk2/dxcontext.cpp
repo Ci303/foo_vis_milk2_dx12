@@ -50,8 +50,7 @@ DXContext::DXContext(HWND hWndWinamp, DXCONTEXT_PARAMS* pParams) noexcept(false)
 
     // Create the device.
     // Provide parameters for swap chain format, depth/stencil format, and back buffer count.
-    const unsigned int flags = DX::DeviceResources::c_FlipPresent | ((m_current_mode.allow_page_tearing << 1) & DX::DeviceResources::c_AllowTearing) |
-        ((m_current_mode.enable_hdr << 2) & DX::DeviceResources::c_EnableHDR);
+    const unsigned int flags = GetD3D12Options();
     if (m_useD3D12)
     {
         m_d3d12Resources = std::make_unique<DX::D3D12Resources>(m_current_mode.back_buffer_format, m_current_mode.back_buffer_count, flags);
@@ -81,6 +80,50 @@ void DXContext::Internal_CleanUp()
     // Release 3D interfaces.
     if (m_lpDevice)
         m_lpDevice.reset();
+}
+
+unsigned int DXContext::GetD3D12Options() const noexcept
+{
+    return DX::DeviceResources::c_FlipPresent |
+           ((m_current_mode.allow_page_tearing << 1) & DX::DeviceResources::c_AllowTearing) |
+           ((m_current_mode.enable_hdr << 2) & DX::DeviceResources::c_EnableHDR);
+}
+
+bool DXContext::RecreateD3D12ResourcesForWindow(HWND window, int width, int height)
+{
+    std::wstring textureDirectory;
+    std::vector<std::wstring> textureFiles;
+    bool presetTextureOverride = false;
+    if (m_d3d12Resources)
+    {
+        textureDirectory = m_d3d12Resources->GetTextureDirectory();
+        textureFiles = m_d3d12Resources->GetActiveTextureFiles();
+        presetTextureOverride = m_d3d12Resources->HasPresetTextureOverride();
+    }
+
+    auto replacement = std::make_unique<DX::D3D12Resources>(m_current_mode.back_buffer_format, m_current_mode.back_buffer_count, GetD3D12Options());
+    replacement->SetWindow(window, width, height);
+    replacement->CreateDeviceResources();
+    replacement->CreateWindowSizeDependentResources();
+
+    if (presetTextureOverride && !textureFiles.empty())
+    {
+        std::vector<const wchar_t*> textureFilePtrs;
+        textureFilePtrs.reserve(textureFiles.size());
+        for (const auto& textureFile : textureFiles)
+        {
+            textureFilePtrs.push_back(textureFile.c_str());
+        }
+        replacement->SetPresetTextureFiles(textureFilePtrs.data(), textureFilePtrs.size());
+    }
+    else if (!textureDirectory.empty())
+    {
+        replacement->SetTextureDirectory(textureDirectory.c_str());
+    }
+
+    auto retired = std::move(m_d3d12Resources);
+    m_d3d12Resources = std::move(replacement);
+    return true;
 }
 
 BOOL DXContext::Internal_Init(DXCONTEXT_PARAMS* /* pParams */, BOOL /* bFirstInit */)
@@ -164,6 +207,24 @@ bool DXContext::SetTextureFile(const wchar_t* textureFile)
     return m_useD3D12 && m_d3d12Resources && m_d3d12Resources->SetTextureFile(textureFile);
 }
 
+bool DXContext::SetTextureFiles(const wchar_t* const* textureFiles, size_t textureFileCount)
+{
+    return m_useD3D12 && m_d3d12Resources && m_d3d12Resources->SetTextureFiles(textureFiles, textureFileCount);
+}
+
+bool DXContext::SetPresetTextureFiles(const wchar_t* const* textureFiles, size_t textureFileCount)
+{
+    return m_useD3D12 && m_d3d12Resources && m_d3d12Resources->SetPresetTextureFiles(textureFiles, textureFileCount);
+}
+
+void DXContext::ClearPresetTextureOverride()
+{
+    if (m_useD3D12 && m_d3d12Resources)
+    {
+        m_d3d12Resources->ClearPresetTextureOverride();
+    }
+}
+
 void DXContext::DrawWaveform(const float* left,
                              const float* right,
                              size_t sampleCount,
@@ -203,6 +264,8 @@ void DXContext::DrawWaveform(const float* left,
                              bool postDarken,
                              bool postSolarize,
                              float postShaderAmount,
+                             float postBlurAmount,
+                             float postBlurEdgeDarken,
                              float outerBorderSize,
                              float outerBorderR,
                              float outerBorderG,
@@ -233,7 +296,7 @@ void DXContext::DrawWaveform(const float* left,
 {
     if (m_useD3D12)
     {
-        m_d3d12Resources->DrawWaveform(left, right, sampleCount, bass, mids, treble, waveR, waveG, waveB, waveA, waveScale, waveX, waveY, decay, zoom, rot, motionCenterX, motionCenterY, motionDX, motionDY, motionStretchX, motionStretchY, motionWarp, echoAlpha, echoZoom, echoOrientation, waveUseDots, waveThick, waveAdditive, waveBrighten, waveMode, waveParam, darkenCenter, postGamma, postInvert, postBrighten, postDarken, postSolarize, postShaderAmount, outerBorderSize, outerBorderR, outerBorderG, outerBorderB, outerBorderA, innerBorderSize, innerBorderR, innerBorderG, innerBorderB, innerBorderA, motionVectorX, motionVectorY, motionVectorDX, motionVectorDY, motionVectorLength, motionVectorR, motionVectorG, motionVectorB, motionVectorA, customShapes, customShapeCount, customWaveVertices, customWaveVertexCount, customWaveDraws, customWaveDrawCount, textureWarpVertices, textureWarpVertexCount);
+        m_d3d12Resources->DrawWaveform(left, right, sampleCount, bass, mids, treble, waveR, waveG, waveB, waveA, waveScale, waveX, waveY, decay, zoom, rot, motionCenterX, motionCenterY, motionDX, motionDY, motionStretchX, motionStretchY, motionWarp, echoAlpha, echoZoom, echoOrientation, waveUseDots, waveThick, waveAdditive, waveBrighten, waveMode, waveParam, darkenCenter, postGamma, postInvert, postBrighten, postDarken, postSolarize, postShaderAmount, postBlurAmount, postBlurEdgeDarken, outerBorderSize, outerBorderR, outerBorderG, outerBorderB, outerBorderA, innerBorderSize, innerBorderR, innerBorderG, innerBorderB, innerBorderA, motionVectorX, motionVectorY, motionVectorDX, motionVectorDY, motionVectorLength, motionVectorR, motionVectorG, motionVectorB, motionVectorA, customShapes, customShapeCount, customWaveVertices, customWaveVertexCount, customWaveDraws, customWaveDrawCount, textureWarpVertices, textureWarpVertexCount);
     }
 }
 
@@ -324,13 +387,38 @@ BOOL DXContext::OnWindowSwap(HWND window, int width, int height)
     if (!window)
         return FALSE;
 
-    Clear();
+    if (!m_useD3D12)
+    {
+        Clear();
+    }
 
     m_hwnd = window;
-    m_client_width = width;
-    m_client_height = height;
+    m_client_width = std::max(width, 1);
+    m_client_height = std::max(height, 1);
 
-    const bool swapped = m_useD3D12 ? m_d3d12Resources->WindowSwap(m_hwnd, m_client_width, m_client_height) : m_deviceResources->WindowSwap(m_hwnd, m_client_width, m_client_height);
+    if (m_useD3D12)
+    {
+        try
+        {
+            if (!RecreateD3D12ResourcesForWindow(m_hwnd, m_client_width, m_client_height))
+            {
+                m_lastErr = DX_ERR_SWAPFAIL;
+                m_ready = FALSE;
+                return FALSE;
+            }
+        }
+        catch (...)
+        {
+            m_lastErr = DX_ERR_SWAPFAIL;
+            m_ready = FALSE;
+            return FALSE;
+        }
+
+        m_ready = TRUE;
+        return TRUE;
+    }
+
+    const bool swapped = m_deviceResources->WindowSwap(m_hwnd, m_client_width, m_client_height);
     if (!swapped)
     {
         m_lastErr = DX_ERR_SWAPFAIL;

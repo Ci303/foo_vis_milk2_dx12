@@ -44,6 +44,7 @@ milk2_ui_element::milk2_ui_element(ui_element_config::ptr config, ui_element_ins
     m_minimized = false;
 #if defined(TIMER_TP)
     m_tpTimer = nullptr;
+    m_renderPending = false;
 #elif defined(TIMER_32)
     m_last_time = 0.0;
 #endif
@@ -200,7 +201,9 @@ void milk2_ui_element::OnClose()
 void milk2_ui_element::OnDestroy()
 {
     MILK2_CONSOLE_LOG("OnDestroy ", GetWnd())
+    m_milk2 = false;
 #if defined(TIMER_TP)
+    m_renderPending = false;
     StopTimer();
     EnterCriticalSection(&s_cs);
 #elif defined(TIMER_DX)
@@ -213,8 +216,6 @@ void milk2_ui_element::OnDestroy()
     if (manager.is_valid())
         manager->remove(this);
 
-    if (m_milk2)
-        m_milk2 = false;
     s_count = 0ull;
 
     if (!s_in_toggle)
@@ -274,7 +275,8 @@ void milk2_ui_element::OnPaint(CDCHandle dc)
         EndPaint(&ps);
     }
 #ifdef TIMER_TP
-    StartTimer();
+    if (m_milk2)
+        StartTimer();
 #endif
     ValidateRect(NULL);
 #ifdef TIMER_32
@@ -313,7 +315,7 @@ BOOL milk2_ui_element::OnEraseBkgnd(CDCHandle dc)
     WIN32_OP_D(brush.CreateSolidBrush(m_callback->query_std_color(ui_color_background)) != NULL);
     WIN32_OP_D(dc.FillRect(&r, brush));
 #else
-    if (!m_milk2 && !s_fullscreen && s_milk2)
+    if (!m_milk2 && !s_fullscreen && s_milk2 && !s_in_toggle)
     {
         int w, h;
         GetDefaultSize(w, h);
@@ -861,6 +863,23 @@ LRESULT milk2_ui_element::OnMilk2Message(UINT uMsg, WPARAM wParam, LPARAM lParam
     return 1;
 }
 
+LRESULT milk2_ui_element::OnRenderMessage(UINT uMsg, WPARAM wParam, LPARAM lParam)
+{
+    UNREFERENCED_PARAMETER(wParam);
+    UNREFERENCED_PARAMETER(lParam);
+
+    if (uMsg != WM_MILK2_RENDER)
+        return -1;
+
+#ifdef TIMER_TP
+    m_renderPending = false;
+#endif
+    if (m_milk2)
+        Tick();
+
+    return 0;
+}
+
 LRESULT milk2_ui_element::OnConfigurationChange(UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
     UNREFERENCED_PARAMETER(lParam);
@@ -945,6 +964,11 @@ bool milk2_ui_element::Initialize(HWND window, int width, int height)
     }
 
     m_milk2 = true;
+#ifdef TIMER_TP
+    m_renderPending = false;
+    StartTimer();
+    ::PostMessage(get_wnd(), WM_MILK2_RENDER, 0, 0);
+#endif
 
     return true;
 }
@@ -953,9 +977,17 @@ bool milk2_ui_element::Initialize(HWND window, int width, int height)
 // Executes the render.
 void milk2_ui_element::Tick()
 {
+    if (!m_milk2)
+        return;
+
 #ifdef TIMER_TP
     if (TryEnterCriticalSection(&s_cs) == 0)
         return;
+    if (!m_milk2)
+    {
+        LeaveCriticalSection(&s_cs);
+        return;
+    }
 #endif
 
 #ifdef TIMER_DX
@@ -1102,11 +1134,18 @@ void milk2_ui_element::ToggleFullScreen()
     MILK2_CONSOLE_LOG("ToggleFullScreen0 ", GetWnd())
     if (m_milk2)
     {
-        if (!s_fullscreen)
-        {
+        const bool enteringFullscreen = !s_fullscreen;
+        if (enteringFullscreen)
             g_hWindow = get_wnd();
-            m_milk2 = false;
+
+        m_milk2 = false;
+#ifdef TIMER_TP
+        m_renderPending = false;
+        if (m_tpTimer != nullptr)
+        {
+            SetThreadpoolTimer(m_tpTimer, NULL, 0, 0);
         }
+#endif
 #if 0
         if (s_fullscreen)
         {
@@ -1130,8 +1169,8 @@ void milk2_ui_element::ToggleFullScreen()
             ShowWindow(SW_SHOWMAXIMIZED);
         }
 #endif
-        s_fullscreen = !s_fullscreen;
         s_in_toggle = true;
+        s_fullscreen = enteringFullscreen;
         SetTopMost();
         static_api_ptr_t<ui_element_common_methods_v2>()->toggle_fullscreen(g_get_guid(), core_api::get_main_window());
         MILK2_CONSOLE_LOG("ToggleFullScreen1 ", GetWnd())
@@ -1432,6 +1471,10 @@ void milk2_ui_element::LaunchSongTitle()
 void milk2_ui_element::StartTimer() noexcept
 {
     MILK2_CONSOLE_LOG_LIMIT("StartTimer ", GetWnd())
+    if (!m_milk2)
+        return;
+    if (m_tpTimer == nullptr)
+        m_tpTimer = CreateThreadpoolTimer(TimerCallback, this, NULL);
     if (m_tpTimer == nullptr)
         return;
 
@@ -1450,6 +1493,7 @@ void milk2_ui_element::StopTimer() noexcept
     SetThreadpoolTimer(m_tpTimer, NULL, 0, 0);
     WaitForThreadpoolTimerCallbacks(m_tpTimer, TRUE);
     CloseThreadpoolTimer(m_tpTimer);
+    m_tpTimer = nullptr;
 }
 
 // Handles a timer tick.
@@ -1458,7 +1502,16 @@ VOID CALLBACK milk2_ui_element::TimerCallback(PTP_CALLBACK_INSTANCE Instance, PV
     UNREFERENCED_PARAMETER(Instance);
     UNREFERENCED_PARAMETER(Timer);
 
-    ((milk2_ui_element*)Context)->Tick();
+    auto* element = static_cast<milk2_ui_element*>(Context);
+    if (element == nullptr || !element->m_milk2)
+        return;
+
+    bool expected = false;
+    if (!element->m_renderPending.compare_exchange_strong(expected, true))
+        return;
+
+    if (!::PostMessage(element->get_wnd(), WM_MILK2_RENDER, 0, 0))
+        element->m_renderPending = false;
 }
 #endif
 

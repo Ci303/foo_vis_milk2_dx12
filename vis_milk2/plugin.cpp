@@ -2351,10 +2351,10 @@ static bool IsShaderIdentifierChar(char c)
     return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_';
 }
 
-static bool ExtractSamplerRoot(const char* shaderText, wchar_t* rootName)
+static void AppendD3D12SamplerRoots(const char* shaderText, std::vector<std::wstring>& roots)
 {
     if (!shaderText)
-        return false;
+        return;
 
     const char* cursor = shaderText;
     while ((cursor = strstr(cursor, "sampler_")) != nullptr)
@@ -2370,6 +2370,7 @@ static bool ExtractSamplerRoot(const char* shaderText, wchar_t* rootName)
         if (n == 0)
             continue;
 
+        wchar_t rootName[MAX_PATH]{};
         wcscpy_s(rootName, MAX_PATH, AutoWide(name));
 
         if (wcslen(rootName) > 3 && rootName[2] == L'_')
@@ -2386,19 +2387,23 @@ static bool ExtractSamplerRoot(const char* shaderText, wchar_t* rootName)
         if (!_wcsicmp(rootName, L"main") || !_wcsnicmp(rootName, L"blur", 4))
             continue;
 
-        return true;
+        bool alreadyQueued = false;
+        for (const auto& existingRoot : roots)
+        {
+            if (!_wcsicmp(existingRoot.c_str(), rootName))
+            {
+                alreadyQueued = true;
+                break;
+            }
+        }
+        if (!alreadyQueued)
+            roots.emplace_back(rootName);
     }
-
-    return false;
 }
 
-bool CPlugin::SelectD3D12PresetTexture()
+static bool ResolveD3D12SamplerRoot(wchar_t* rootName)
 {
-    if (!IsD3D12Mode())
-        return false;
-
-    wchar_t rootName[MAX_PATH]{};
-    if (!ExtractSamplerRoot(m_pState->m_szCompShadersText, rootName) && !ExtractSamplerRoot(m_pState->m_szWarpShadersText, rootName))
+    if (!rootName || !*rootName)
         return false;
 
     if (!wcsncmp(L"rand", rootName, 4) &&
@@ -2420,20 +2425,90 @@ bool CPlugin::SelectD3D12PresetTexture()
         }
     }
 
+    return true;
+}
+
+static bool AppendD3D12SamplerTextureFile(const wchar_t* milkdropPath, const wchar_t* presetDir, const wchar_t* rootName, std::vector<std::wstring>& textureFiles)
+{
+    if (!milkdropPath || !presetDir || !rootName || !*rootName)
+        return false;
+
     static constexpr const wchar_t* d3d12TextureExts[] = {L"jpg", L"jpeg", L"png", L"bmp", L"gif", L"jfif", L"dds", L"tga"};
     wchar_t filename[MAX_PATH]{};
     for (const wchar_t* ext : d3d12TextureExts)
     {
-        swprintf_s(filename, L"%stextures\\%s.%s", m_szMilkdrop2Path, rootName, ext);
-        if (GetFileAttributes(filename) != INVALID_FILE_ATTRIBUTES && m_lpDX->SetTextureFile(filename))
+        swprintf_s(filename, L"%stextures\\%s.%s", milkdropPath, rootName, ext);
+        if (GetFileAttributes(filename) != INVALID_FILE_ATTRIBUTES)
+        {
+            bool duplicate = false;
+            for (const auto& existingFile : textureFiles)
+            {
+                if (!_wcsicmp(existingFile.c_str(), filename))
+                {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (!duplicate)
+                textureFiles.emplace_back(filename);
             return true;
+        }
 
-        swprintf_s(filename, L"%s%s.%s", m_szPresetDir, rootName, ext);
-        if (GetFileAttributes(filename) != INVALID_FILE_ATTRIBUTES && m_lpDX->SetTextureFile(filename))
+        swprintf_s(filename, L"%s%s.%s", presetDir, rootName, ext);
+        if (GetFileAttributes(filename) != INVALID_FILE_ATTRIBUTES)
+        {
+            bool duplicate = false;
+            for (const auto& existingFile : textureFiles)
+            {
+                if (!_wcsicmp(existingFile.c_str(), filename))
+                {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (!duplicate)
+                textureFiles.emplace_back(filename);
             return true;
+        }
     }
 
     return false;
+}
+
+bool CPlugin::SelectD3D12PresetTexture()
+{
+    if (!IsD3D12Mode())
+        return false;
+
+    std::vector<std::wstring> roots;
+    AppendD3D12SamplerRoots(m_pState->m_szCompShadersText, roots);
+    AppendD3D12SamplerRoots(m_pState->m_szWarpShadersText, roots);
+    std::vector<std::wstring> textureFiles;
+    for (const auto& root : roots)
+    {
+        wchar_t rootName[MAX_PATH]{};
+        wcscpy_s(rootName, root.c_str());
+        if (!ResolveD3D12SamplerRoot(rootName))
+            continue;
+
+        AppendD3D12SamplerTextureFile(m_szMilkdrop2Path, m_szPresetDir, rootName, textureFiles);
+        if (textureFiles.size() >= 4)
+            break;
+    }
+
+    if (textureFiles.empty())
+    {
+        m_lpDX->ClearPresetTextureOverride();
+        return false;
+    }
+
+    std::vector<const wchar_t*> textureFilePtrs;
+    textureFilePtrs.reserve(textureFiles.size());
+    for (const auto& textureFile : textureFiles)
+    {
+        textureFilePtrs.push_back(textureFile.c_str());
+    }
+    return m_lpDX->SetPresetTextureFiles(textureFilePtrs.data(), textureFilePtrs.size());
 }
 
 void CShaderParams::CacheParams(CConstantTable* pCT, bool /* bHardErrors */)
@@ -3896,6 +3971,8 @@ void CPlugin::MilkDropRenderFrame(int redraw)
                              clean(*m_pState->var_pf_darken, 0.0f) > 0.5f,
                              clean(*m_pState->var_pf_solarize, 0.0f) > 0.5f,
                              clean(m_pState->m_fShader.eval(GetTime()), 0.0f),
+                             std::clamp(1.0f - (clean(*m_pState->var_pf_blur1max, 1.0f) - clean(*m_pState->var_pf_blur1min, 0.0f)), 0.0f, 1.0f),
+                             clean(*m_pState->var_pf_blur1_edge_darken, 0.25f),
                              clean(*m_pState->var_pf_ob_size, 0.0f),
                              clean(*m_pState->var_pf_ob_r, 0.0f),
                              clean(*m_pState->var_pf_ob_g, 0.0f),

@@ -82,6 +82,9 @@ class DXContext final
     void Clear();
     void SetTextureDirectory(const wchar_t* textureDirectory);
     bool SetTextureFile(const wchar_t* textureFile);
+    bool SetTextureFiles(const wchar_t* const* textureFiles, size_t textureFileCount);
+    bool SetPresetTextureFiles(const wchar_t* const* textureFiles, size_t textureFileCount);
+    void ClearPresetTextureOverride();
     void DrawWaveform(const float* left,
                       const float* right,
                       size_t sampleCount,
@@ -121,6 +124,8 @@ class DXContext final
                       bool postDarken = false,
                       bool postSolarize = false,
                       float postShaderAmount = 0.0f,
+                      float postBlurAmount = 0.0f,
+                      float postBlurEdgeDarken = 0.25f,
                       float outerBorderSize = 0.0f,
                       float outerBorderR = 0.0f,
                       float outerBorderG = 0.0f,
@@ -179,6 +184,8 @@ class DXContext final
 
     BOOL Internal_Init(DXCONTEXT_PARAMS* pParams, BOOL bFirstInit);
     void Internal_CleanUp();
+    unsigned int GetD3D12Options() const noexcept;
+    bool RecreateD3D12ResourcesForWindow(HWND window, int width, int height);
 
     bool m_useD3D12;
     std::unique_ptr<DX::DeviceResources> m_deviceResources;
