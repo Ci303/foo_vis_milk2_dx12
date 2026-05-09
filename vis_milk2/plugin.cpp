@@ -6163,6 +6163,19 @@ void CPlugin::LoadPresetTick()
         m_nLoadingPreset++;
 }
 
+void CPlugin::ResumeD3D12AfterWindowSwap()
+{
+    if (!IsD3D12Mode())
+        return;
+
+    m_nLoadingPreset = 0;
+    m_szLoadingPreset[0] = 0;
+    m_pState->m_bBlending = false;
+    m_fPresetStartTime = GetTime();
+    m_fNextPresetTime = -1.0f;
+    SelectD3D12PresetTexture();
+}
+
 void CPlugin::SetPresetListPosition(std::wstring search)
 {
     size_t basename = search.find_last_of(L"\\");

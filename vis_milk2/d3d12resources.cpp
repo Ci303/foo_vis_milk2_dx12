@@ -293,6 +293,27 @@ void D3D12Resources::ClearPresetTextureOverride()
     m_presetTextureOverride = false;
 }
 
+void D3D12Resources::ResetVisualHistory()
+{
+    if (!m_swapChain || !m_commandQueue || !m_fence)
+    {
+        return;
+    }
+
+    WaitForGpu(1000);
+    m_feedbackReady[0] = false;
+    m_feedbackReady[1] = false;
+    m_feedbackIndex = 0;
+    m_lastTextureCycleTick = 0;
+
+    const UINT buffersToPrime = std::max<UINT>(m_backBufferCount, 1u);
+    for (UINT i = 0; i < buffersToPrime; ++i)
+    {
+        Clear();
+        Present();
+    }
+}
+
 bool D3D12Resources::SetTextureFilesInternal(const wchar_t* const* textureFiles, size_t textureFileCount, bool presetTextureOverride)
 {
     if (!m_d3dDevice || !m_commandQueue || !textureFiles || textureFileCount == 0)

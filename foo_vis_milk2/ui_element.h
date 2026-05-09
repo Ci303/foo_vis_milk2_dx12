@@ -27,6 +27,7 @@ static milk2_config s_config;
 static std::wstring s_pwd;
 #ifdef TIMER_TP
 CRITICAL_SECTION s_cs;
+static bool s_cs_initialized = false;
 #endif
 
 #pragma region UI Element
@@ -89,6 +90,7 @@ class milk2_ui_element : public ui_element_instance, public CWindowImpl<milk2_ui
         MESSAGE_HANDLER_EX(WM_QUIT, OnQuit)
         MESSAGE_HANDLER_EX(WM_MILK2, OnMilk2Message)
         MESSAGE_HANDLER_EX(WM_MILK2_RENDER, OnRenderMessage)
+        MESSAGE_HANDLER_EX(WM_MILK2_RESTORE_WINDOWED, OnRestoreWindowed)
         MESSAGE_HANDLER_EX(WM_CONFIG_CHANGE, OnConfigurationChange)
     END_MSG_MAP()
     // clang-format on
@@ -144,6 +146,7 @@ class milk2_ui_element : public ui_element_instance, public CWindowImpl<milk2_ui
     LRESULT OnQuit(UINT uMsg, WPARAM wParam, LPARAM lParam);
     LRESULT OnMilk2Message(UINT uMsg, WPARAM wParam, LPARAM lParam);
     LRESULT OnRenderMessage(UINT uMsg, WPARAM wParam, LPARAM lParam);
+    LRESULT OnRestoreWindowed(UINT uMsg, WPARAM wParam, LPARAM lParam);
     LRESULT OnConfigurationChange(UINT uMsg, WPARAM wParam, LPARAM lParam);
 
     PWCHAR GetWnd() { swprintf_s(m_szWnd, TEXT("0x%p %dfs %dt"), get_wnd(), s_fullscreen, s_in_toggle); return m_szWnd; }
@@ -247,6 +250,7 @@ class milk2_ui_element : public ui_element_instance, public CWindowImpl<milk2_ui
     static VOID CALLBACK TimerCallback(PTP_CALLBACK_INSTANCE Instance, PVOID Context, PTP_TIMER Timer) noexcept;
     PTP_TIMER m_tpTimer;
     std::atomic_bool m_renderPending{false};
+    std::atomic_ulong m_renderPostTick{0};
 #endif
 
     // Topmost setting

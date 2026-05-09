@@ -400,12 +400,14 @@ BOOL DXContext::OnWindowSwap(HWND window, int width, int height)
     {
         try
         {
-            if (!RecreateD3D12ResourcesForWindow(m_hwnd, m_client_width, m_client_height))
+            if (!m_d3d12Resources->WindowSwap(m_hwnd, m_client_width, m_client_height) &&
+                !RecreateD3D12ResourcesForWindow(m_hwnd, m_client_width, m_client_height))
             {
                 m_lastErr = DX_ERR_SWAPFAIL;
                 m_ready = FALSE;
                 return FALSE;
             }
+            m_d3d12Resources->ResetVisualHistory();
         }
         catch (...)
         {

@@ -89,6 +89,7 @@ class D3D12Resources
     bool SetTextureFiles(const wchar_t* const* textureFiles, size_t textureFileCount);
     bool SetPresetTextureFiles(const wchar_t* const* textureFiles, size_t textureFileCount);
     void ClearPresetTextureOverride();
+    void ResetVisualHistory();
     void Clear();
     void DrawWaveform(const float* left,
                       const float* right,

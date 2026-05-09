@@ -37,7 +37,8 @@ The current DX12 development path can:
 - render native D3D12 feedback/trails, preset echo controls, darken-center, borders, motion vectors, custom shapes, and custom waves;
 - run preset per-frame equations on the DX12 path;
 - apply an experimental texture/feedback warp mesh from the MilkDrop per-pixel grid;
-- apply an experimental postprocess pass for gamma, brighten, darken, solarize, invert, and first `fShader` approximation when `FOO_VIS_MILK2_DX12_POSTPROCESS=1`.
+- apply an experimental postprocess pass for gamma, brighten, darken, solarize, invert, and first `fShader` approximation when `FOO_VIS_MILK2_DX12_POSTPROCESS=1`;
+- enter fullscreen and return to the hosted windowed foobar2000 panel without leaving the panel render loop stopped.
 
 The current DX12 path is still incomplete. It does not yet provide full MilkDrop rendering parity and should be treated as active renderer development.
 
@@ -168,7 +169,9 @@ Some DDS/TGA variants may still fail if they use compression or pixel formats ou
 
 Do not test this by replacing a working live foobar2000 install unless you have a backup and intentionally want to test the experimental component there.
 
-The current postprocess and texture/feedback warp work is experimental. It may introduce visual artifacting during portable testing, including possible desktop or compositor artifacts outside the foobar2000 window. If that happens, disable `FOO_VIS_MILK2_DX12_POSTPROCESS`, use the safe portable launcher, or restart the affected process/session before continuing.
+The current postprocess and texture/feedback warp work is experimental. If DX12 rendering behaves unexpectedly, disable `FOO_VIS_MILK2_DX12_POSTPROCESS`, use the safe portable launcher, or restart the affected process/session before continuing.
+
+Fullscreen transitions are supported in the DX12 development path. The component explicitly restores the original hosted panel after foobar2000 destroys the temporary fullscreen visualization window, then rebuilds the DX12 runtime for that windowed panel.
 
 The current recommended workflow is:
 

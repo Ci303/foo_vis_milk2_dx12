@@ -45,6 +45,7 @@ milk2_ui_element::milk2_ui_element(ui_element_config::ptr config, ui_element_ins
 #if defined(TIMER_TP)
     m_tpTimer = nullptr;
     m_renderPending = false;
+    m_renderPostTick = 0;
 #elif defined(TIMER_32)
     m_last_time = 0.0;
 #endif
@@ -141,7 +142,11 @@ int milk2_ui_element::OnCreate(LPCREATESTRUCT cs)
         ResolvePwd();
         s_config.init();
 #ifdef TIMER_TP
-        InitializeCriticalSection(&s_cs);
+        if (!s_cs_initialized)
+        {
+            InitializeCriticalSection(&s_cs);
+            s_cs_initialized = true;
+        }
 #endif
     }
 
@@ -204,8 +209,11 @@ void milk2_ui_element::OnDestroy()
     m_milk2 = false;
 #if defined(TIMER_TP)
     m_renderPending = false;
+    m_renderPostTick = 0;
     StopTimer();
-    EnterCriticalSection(&s_cs);
+    const bool csEntered = s_cs_initialized;
+    if (csEntered)
+        EnterCriticalSection(&s_cs);
 #elif defined(TIMER_DX)
     message_loop_v2::get()->remove_idle_handler(this);
 #endif
@@ -218,7 +226,8 @@ void milk2_ui_element::OnDestroy()
 
     s_count = 0ull;
 
-    if (!s_in_toggle)
+    const bool finalDestroy = !s_in_toggle;
+    if (finalDestroy)
     {
         MILK2_CONSOLE_LOG("ExitVis")
         s_fullscreen = false;
@@ -227,8 +236,6 @@ void milk2_ui_element::OnDestroy()
         s_milk2 = false;
 #if defined(TIMER_32)
         KillTimer(ID_REFRESH_TIMER);
-#elif defined(TIMER_TP)
-        DeleteCriticalSection(&s_cs);
 #endif
         wcscpy_s(s_config.settings.m_szPresetDir, g_plugin.GetPresetDir()); // save last "Load Preset" menu directory
         g_plugin.PluginQuit();
@@ -242,9 +249,19 @@ void milk2_ui_element::OnDestroy()
     else
     {
         s_in_toggle = false;
+        if (!s_fullscreen && g_hWindow && g_hWindow != get_wnd() && ::IsWindow(g_hWindow))
+        {
+            ::PostMessage(g_hWindow, WM_MILK2_RESTORE_WINDOWED, 0, 0);
+        }
     }
 #ifdef TIMER_TP
-    LeaveCriticalSection(&s_cs);
+    if (csEntered)
+        LeaveCriticalSection(&s_cs);
+    if (finalDestroy && s_cs_initialized)
+    {
+        DeleteCriticalSection(&s_cs);
+        s_cs_initialized = false;
+    }
 #endif
 }
 
@@ -315,7 +332,7 @@ BOOL milk2_ui_element::OnEraseBkgnd(CDCHandle dc)
     WIN32_OP_D(brush.CreateSolidBrush(m_callback->query_std_color(ui_color_background)) != NULL);
     WIN32_OP_D(dc.FillRect(&r, brush));
 #else
-    if (!m_milk2 && !s_fullscreen && s_milk2 && !s_in_toggle)
+    if (!g_plugin.IsD3D12Active() && !m_milk2 && !s_fullscreen && s_milk2 && !s_in_toggle)
     {
         int w, h;
         GetDefaultSize(w, h);
@@ -873,10 +890,42 @@ LRESULT milk2_ui_element::OnRenderMessage(UINT uMsg, WPARAM wParam, LPARAM lPara
 
 #ifdef TIMER_TP
     m_renderPending = false;
+    m_renderPostTick = 0;
 #endif
     if (m_milk2)
         Tick();
 
+    return 0;
+}
+
+LRESULT milk2_ui_element::OnRestoreWindowed(UINT uMsg, WPARAM wParam, LPARAM lParam)
+{
+    UNREFERENCED_PARAMETER(wParam);
+    UNREFERENCED_PARAMETER(lParam);
+
+    if (uMsg != WM_MILK2_RESTORE_WINDOWED)
+        return -1;
+
+    if (s_fullscreen || m_milk2)
+        return 0;
+
+    int w, h;
+    GetDefaultSize(w, h);
+
+    CRect r{};
+    if (::GetClientRect(get_wnd(), &r) && r.right - r.left > 0 && r.bottom - r.top > 0)
+    {
+        w = r.right - r.left;
+        h = r.bottom - r.top;
+    }
+
+    if (!Initialize(get_wnd(), w, h))
+    {
+        FB2K_console_print(core_api::get_my_file_name(), ": Could not restore MilkDrop after fullscreen");
+        return 0;
+    }
+
+    InvalidateRect(nullptr, FALSE);
     return 0;
 }
 
@@ -923,25 +972,17 @@ LRESULT milk2_ui_element::OnConfigurationChange(UINT uMsg, WPARAM wParam, LPARAM
 // Initialize the Direct3D resources required to run.
 bool milk2_ui_element::Initialize(HWND window, int width, int height)
 {
-    if (!s_milk2)
+    const auto initializeFreshPlugin = [&]() -> bool
     {
         if (FALSE == g_plugin.PluginPreInitialize(window, core_api::get_my_instance()))
             return false;
         if (!g_plugin.PanelSettings(&s_config.settings))
             return false;
 
-        //swprintf_s(g_plugin.m_szPluginsDirPath, L"%ls", s_config.settings.m_szPluginsDirPath);
-        //swprintf_s(g_plugin.m_szConfigIniFile, L"%ls", s_config.settings.m_szConfigIniFile);
         swprintf_s(g_plugin.m_szComponentDirPath, L"%ls", const_cast<wchar_t*>(m_pwd.c_str()));
+        g_plugin.SetWinampWindow(window);
+        g_plugin.SetScreenMode(s_fullscreen ? FULLSCREEN : WINDOWED);
 
-        if (!s_fullscreen)
-            g_hWindow = get_wnd();
-    }
-
-    g_plugin.SetWinampWindow(window);
-
-    if (!s_milk2)
-    {
         if (FALSE == g_plugin.PluginInitialize(width, height))
             return false;
 
@@ -951,13 +992,44 @@ bool milk2_ui_element::Initialize(HWND window, int width, int height)
         ::SetClassLongPtr(parent, GCLP_HICONSM, (LONG_PTR)hIcon);
 
         s_milk2 = true;
+        return true;
+    };
+
+    if (!s_milk2)
+    {
+        if (!s_fullscreen)
+            g_hWindow = get_wnd();
+    }
+
+    if (!s_milk2)
+    {
+        if (!initializeFreshPlugin())
+            return false;
     }
     else
     {
+        const bool rebuildD3D12 = g_plugin.IsD3D12Active();
 #ifdef TIMER_TP
         EnterCriticalSection(&s_cs);
 #endif
-        g_plugin.OnWindowSwap(window, width, height);
+        if (rebuildD3D12)
+        {
+            g_plugin.PluginQuit();
+            s_milk2 = false;
+            if (!initializeFreshPlugin())
+            {
+#ifdef TIMER_TP
+                LeaveCriticalSection(&s_cs);
+#endif
+                return false;
+            }
+        }
+        else
+        {
+            g_plugin.SetWinampWindow(window);
+            g_plugin.OnWindowSwap(window, width, height);
+            g_plugin.ResumeD3D12AfterWindowSwap();
+        }
 #ifdef TIMER_TP
         LeaveCriticalSection(&s_cs);
 #endif
@@ -966,6 +1038,7 @@ bool milk2_ui_element::Initialize(HWND window, int width, int height)
     m_milk2 = true;
 #ifdef TIMER_TP
     m_renderPending = false;
+    m_renderPostTick = 0;
     StartTimer();
     ::PostMessage(get_wnd(), WM_MILK2_RENDER, 0, 0);
 #endif
@@ -1141,9 +1214,11 @@ void milk2_ui_element::ToggleFullScreen()
         m_milk2 = false;
 #ifdef TIMER_TP
         m_renderPending = false;
+        m_renderPostTick = 0;
         if (m_tpTimer != nullptr)
         {
             SetThreadpoolTimer(m_tpTimer, NULL, 0, 0);
+            WaitForThreadpoolTimerCallbacks(m_tpTimer, TRUE);
         }
 #endif
 #if 0
@@ -1506,12 +1581,24 @@ VOID CALLBACK milk2_ui_element::TimerCallback(PTP_CALLBACK_INSTANCE Instance, PV
     if (element == nullptr || !element->m_milk2)
         return;
 
+    const DWORD now = GetTickCount();
+    const DWORD postedAt = element->m_renderPostTick.load();
+    if (element->m_renderPending && postedAt != 0 && now - postedAt > 250)
+    {
+        element->m_renderPending = false;
+        element->m_renderPostTick = 0;
+    }
+
     bool expected = false;
     if (!element->m_renderPending.compare_exchange_strong(expected, true))
         return;
 
+    element->m_renderPostTick = now;
     if (!::PostMessage(element->get_wnd(), WM_MILK2_RENDER, 0, 0))
+    {
         element->m_renderPending = false;
+        element->m_renderPostTick = 0;
+    }
 }
 #endif
 
