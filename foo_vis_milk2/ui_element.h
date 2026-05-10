@@ -91,6 +91,7 @@ class milk2_ui_element : public ui_element_instance, public CWindowImpl<milk2_ui
         MESSAGE_HANDLER_EX(WM_MILK2, OnMilk2Message)
         MESSAGE_HANDLER_EX(WM_MILK2_RENDER, OnRenderMessage)
         MESSAGE_HANDLER_EX(WM_MILK2_RESTORE_WINDOWED, OnRestoreWindowed)
+        MESSAGE_HANDLER_EX(WM_MILK2_REPAIR_WINDOWED_DX12, OnRepairWindowedD3D12)
         MESSAGE_HANDLER_EX(WM_CONFIG_CHANGE, OnConfigurationChange)
     END_MSG_MAP()
     // clang-format on
@@ -147,6 +148,7 @@ class milk2_ui_element : public ui_element_instance, public CWindowImpl<milk2_ui
     LRESULT OnMilk2Message(UINT uMsg, WPARAM wParam, LPARAM lParam);
     LRESULT OnRenderMessage(UINT uMsg, WPARAM wParam, LPARAM lParam);
     LRESULT OnRestoreWindowed(UINT uMsg, WPARAM wParam, LPARAM lParam);
+    LRESULT OnRepairWindowedD3D12(UINT uMsg, WPARAM wParam, LPARAM lParam);
     LRESULT OnConfigurationChange(UINT uMsg, WPARAM wParam, LPARAM lParam);
 
     PWCHAR GetWnd() { swprintf_s(m_szWnd, TEXT("0x%p %dfs %dt"), get_wnd(), s_fullscreen, s_in_toggle); return m_szWnd; }

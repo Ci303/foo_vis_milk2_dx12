@@ -31,6 +31,19 @@
 #include "pch.h"
 #include "dxcontext.h"
 
+namespace
+{
+bool IsEnvFlagEnabled(const wchar_t* name, bool defaultValue = false)
+{
+    wchar_t value[8]{};
+    const DWORD length = GetEnvironmentVariableW(name, value, static_cast<DWORD>(std::size(value)));
+    if (length == 0)
+        return defaultValue;
+
+    return wcscmp(value, L"0") != 0;
+}
+}
+
 DXContext::DXContext(HWND hWndWinamp, DXCONTEXT_PARAMS* pParams) noexcept(false)
 {
     m_hwnd = hWndWinamp;
@@ -45,8 +58,8 @@ DXContext::DXContext(HWND hWndWinamp, DXCONTEXT_PARAMS* pParams) noexcept(false)
 
     // Clear the active flag.
     m_ready = FALSE;
-    wchar_t dx12Mode[8]{};
-    m_useD3D12 = GetEnvironmentVariableW(L"FOO_VIS_MILK2_DX12_DEV", dx12Mode, static_cast<DWORD>(std::size(dx12Mode))) > 0 && wcscmp(dx12Mode, L"0") != 0;
+    m_useD3D12 = IsEnvFlagEnabled(L"FOO_VIS_MILK2_DX12_DEV");
+    m_d3d12ResizeSwapChain = IsEnvFlagEnabled(L"FOO_VIS_MILK2_DX12_RESIZE_SWAPCHAIN");
 
     // Create the device.
     // Provide parameters for swap chain format, depth/stencil format, and back buffer count.
@@ -119,6 +132,16 @@ bool DXContext::RecreateD3D12ResourcesForWindow(HWND window, int width, int heig
     else if (!textureDirectory.empty())
     {
         replacement->SetTextureDirectory(textureDirectory.c_str());
+        if (!textureFiles.empty())
+        {
+            std::vector<const wchar_t*> textureFilePtrs;
+            textureFilePtrs.reserve(textureFiles.size());
+            for (const auto& textureFile : textureFiles)
+            {
+                textureFilePtrs.push_back(textureFile.c_str());
+            }
+            replacement->SetTextureFiles(textureFilePtrs.data(), textureFilePtrs.size());
+        }
     }
 
     auto retired = std::move(m_d3d12Resources);
@@ -225,8 +248,90 @@ void DXContext::ClearPresetTextureOverride()
     }
 }
 
+bool DXContext::SetD3D12PresetCompositeShader(const void* bytecode, size_t bytecodeSize)
+{
+    return m_useD3D12 && m_d3d12Resources && m_d3d12Resources->SetPresetCompositeShader(bytecode, bytecodeSize);
+}
+
+void DXContext::ClearD3D12PresetCompositeShader()
+{
+    if (m_useD3D12 && m_d3d12Resources)
+    {
+        m_d3d12Resources->ClearPresetCompositeShader();
+    }
+}
+
+void DXContext::SetD3D12PresetShaderRuntimeConstants(float time,
+                                                     float fps,
+                                                     float frame,
+                                                     float progress,
+                                                     float bass,
+                                                     float mids,
+                                                     float treble,
+                                                     float bassAtt,
+                                                     float midsAtt,
+                                                     float trebleAtt,
+                                                     const float* qValues,
+                                                     const float* randFrame,
+                                                     const float* randPreset,
+                                                     const float* blurMin,
+                                                     const float* blurMax,
+                                                     const float* rotMatrices)
+{
+    if (m_useD3D12 && m_d3d12Resources)
+    {
+        m_d3d12Resources->SetPresetShaderRuntimeConstants(time,
+                                                          fps,
+                                                          frame,
+                                                          progress,
+                                                          bass,
+                                                          mids,
+                                                          treble,
+                                                          bassAtt,
+                                                          midsAtt,
+                                                          trebleAtt,
+                                                          qValues,
+                                                          randFrame,
+                                                          randPreset,
+                                                          blurMin,
+                                                          blurMax,
+                                                          rotMatrices);
+    }
+}
+
+bool DXContext::CaptureD3D12Frame(std::vector<uint8_t>* pixels, UINT* width, UINT* height)
+{
+    return m_useD3D12 && m_d3d12Resources && m_d3d12Resources->CaptureCurrentFrame(pixels, width, height);
+}
+
+bool DXContext::SetD3D12ResumeFeedback(UINT width, UINT height, const std::vector<uint8_t>& pixels)
+{
+    return m_useD3D12 && m_d3d12Resources && m_d3d12Resources->SetResumeFeedbackFromFrame(width, height, pixels);
+}
+
+void DXContext::SetD3D12TextOverlay(const wchar_t* topLeft,
+                                    const wchar_t* topRight,
+                                    const wchar_t* bottomLeft,
+                                    const wchar_t* debugLine,
+                                    const wchar_t* centerText,
+                                    float centerX,
+                                    float centerY,
+                                    float centerScale,
+                                    float centerR,
+                                    float centerG,
+                                    float centerB,
+                                    float centerA)
+{
+    if (m_useD3D12 && m_d3d12Resources)
+    {
+        m_d3d12Resources->SetTextOverlay(topLeft, topRight, bottomLeft, debugLine, centerText, centerX, centerY, centerScale, centerR, centerG, centerB, centerA);
+    }
+}
+
 void DXContext::DrawWaveform(const float* left,
                              const float* right,
+                             const float* spectrumLeft,
+                             const float* spectrumRight,
                              size_t sampleCount,
                              float bass,
                              float mids,
@@ -257,6 +362,8 @@ void DXContext::DrawWaveform(const float* left,
                              bool waveBrighten,
                              int waveMode,
                              float waveParam,
+                             float waveSmoothing,
+                             float waveAlphaVolumeScale,
                              bool darkenCenter,
                              float postGamma,
                              bool postInvert,
@@ -264,6 +371,7 @@ void DXContext::DrawWaveform(const float* left,
                              bool postDarken,
                              bool postSolarize,
                              float postShaderAmount,
+                             const float* postHueShaderColors,
                              float postBlurAmount,
                              float postBlurEdgeDarken,
                              float outerBorderSize,
@@ -292,11 +400,29 @@ void DXContext::DrawWaveform(const float* left,
                              const DX::CustomWaveDrawCommand* customWaveDraws,
                              size_t customWaveDrawCount,
                              const DX::TextureWarpVertex* textureWarpVertices,
-                             size_t textureWarpVertexCount)
+                             size_t textureWarpVertexCount,
+                             int textureWarpGridX,
+                             int textureWarpGridY)
 {
     if (m_useD3D12)
     {
-        m_d3d12Resources->DrawWaveform(left, right, sampleCount, bass, mids, treble, waveR, waveG, waveB, waveA, waveScale, waveX, waveY, decay, zoom, rot, motionCenterX, motionCenterY, motionDX, motionDY, motionStretchX, motionStretchY, motionWarp, echoAlpha, echoZoom, echoOrientation, waveUseDots, waveThick, waveAdditive, waveBrighten, waveMode, waveParam, darkenCenter, postGamma, postInvert, postBrighten, postDarken, postSolarize, postShaderAmount, postBlurAmount, postBlurEdgeDarken, outerBorderSize, outerBorderR, outerBorderG, outerBorderB, outerBorderA, innerBorderSize, innerBorderR, innerBorderG, innerBorderB, innerBorderA, motionVectorX, motionVectorY, motionVectorDX, motionVectorDY, motionVectorLength, motionVectorR, motionVectorG, motionVectorB, motionVectorA, customShapes, customShapeCount, customWaveVertices, customWaveVertexCount, customWaveDraws, customWaveDrawCount, textureWarpVertices, textureWarpVertexCount);
+        if (m_d3d12ResizePending)
+        {
+            try
+            {
+                if (m_d3d12Resources->WindowSizeChanged(m_d3d12PendingWidth, m_d3d12PendingHeight))
+                {
+                    m_client_width = m_d3d12PendingWidth;
+                    m_client_height = m_d3d12PendingHeight;
+                }
+            }
+            catch (...)
+            {
+            }
+            m_d3d12ResizePending = false;
+        }
+
+        m_d3d12Resources->DrawWaveform(left, right, spectrumLeft, spectrumRight, sampleCount, bass, mids, treble, waveR, waveG, waveB, waveA, waveScale, waveX, waveY, decay, zoom, rot, motionCenterX, motionCenterY, motionDX, motionDY, motionStretchX, motionStretchY, motionWarp, echoAlpha, echoZoom, echoOrientation, waveUseDots, waveThick, waveAdditive, waveBrighten, waveMode, waveParam, waveSmoothing, waveAlphaVolumeScale, darkenCenter, postGamma, postInvert, postBrighten, postDarken, postSolarize, postShaderAmount, postHueShaderColors, postBlurAmount, postBlurEdgeDarken, outerBorderSize, outerBorderR, outerBorderG, outerBorderB, outerBorderA, innerBorderSize, innerBorderR, innerBorderG, innerBorderB, innerBorderA, motionVectorX, motionVectorY, motionVectorDX, motionVectorDY, motionVectorLength, motionVectorR, motionVectorG, motionVectorB, motionVectorA, customShapes, customShapeCount, customWaveVertices, customWaveVertexCount, customWaveDraws, customWaveDrawCount, textureWarpVertices, textureWarpVertexCount, textureWarpGridX, textureWarpGridY);
     }
 }
 
@@ -337,11 +463,11 @@ BOOL DXContext::StartOrRestartDevice(DXCONTEXT_PARAMS* pParams)
 
 void DXContext::OnWindowMoved()
 {
-    auto const r = m_useD3D12 ? m_d3d12Resources->GetOutputSize() : m_deviceResources->GetOutputSize();
     if (m_useD3D12)
-        m_d3d12Resources->WindowSizeChanged(r.right, r.bottom);
-    else
-        m_deviceResources->WindowSizeChanged(r.right, r.bottom);
+        return;
+
+    auto const r = m_useD3D12 ? m_d3d12Resources->GetOutputSize() : m_deviceResources->GetOutputSize();
+    m_deviceResources->WindowSizeChanged(r.right, r.bottom);
 }
 
 void DXContext::OnDisplayChange()
@@ -361,10 +487,36 @@ BOOL DXContext::OnWindowSizeChanged(int width, int height)
     if ((m_client_width == width) && (m_client_height == height))
         return TRUE;
 
+    if (m_useD3D12)
+    {
+        m_client_width = std::max(width, 1);
+        m_client_height = std::max(height, 1);
+
+        const bool allowSwapChainResize = m_d3d12ResizeSwapChain || m_current_mode.screenmode == FULLSCREEN;
+        if (!allowSwapChainResize)
+        {
+            m_d3d12ResizePending = false;
+            return TRUE;
+        }
+
+        m_d3d12PendingWidth = m_client_width;
+        m_d3d12PendingHeight = m_client_height;
+        m_d3d12ResizePending = true;
+        return TRUE;
+    }
+
     m_client_width = width;
     m_client_height = height;
 
-    const bool resized = m_useD3D12 ? m_d3d12Resources->WindowSizeChanged(width, height) : m_deviceResources->WindowSizeChanged(width, height);
+    bool resized = false;
+    try
+    {
+        resized = m_deviceResources->WindowSizeChanged(width, height);
+    }
+    catch (...)
+    {
+        resized = false;
+    }
     if (!resized)
     {
         m_lastErr = DX_ERR_RESIZEFAILED;
@@ -372,8 +524,7 @@ BOOL DXContext::OnWindowSizeChanged(int width, int height)
         return FALSE;
     }
 
-    if (!m_useD3D12)
-        CreateWindowSizeDependentResources();
+    CreateWindowSizeDependentResources();
 
     m_ready = TRUE;
     return TRUE;
@@ -407,7 +558,6 @@ BOOL DXContext::OnWindowSwap(HWND window, int width, int height)
                 m_ready = FALSE;
                 return FALSE;
             }
-            m_d3d12Resources->ResetVisualHistory();
         }
         catch (...)
         {

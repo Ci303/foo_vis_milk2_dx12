@@ -267,7 +267,12 @@ void milk2_ui_element::OnDestroy()
 
 void milk2_ui_element::OnTimer(UINT_PTR nIDEvent)
 {
-    UNREFERENCED_PARAMETER(nIDEvent);
+    if (nIDEvent == WM_MILK2_REPAIR_WINDOWED_DX12)
+    {
+        ::KillTimer(get_wnd(), WM_MILK2_REPAIR_WINDOWED_DX12);
+        ::PostMessage(get_wnd(), WM_MILK2_REPAIR_WINDOWED_DX12, 0, 0);
+        return;
+    }
 
     MILK2_CONSOLE_LOG_LIMIT("OnTimer ", GetWnd())
 #ifdef TIMER_32
@@ -414,7 +419,9 @@ void milk2_ui_element::OnSize(UINT nType, CSize size)
         if (TryEnterCriticalSection(&s_cs) == 0)
             return;
 #endif
-        g_plugin.OnWindowSizeChanged(size.cx, size.cy);
+        g_plugin.OnWindowSizeChanged(width, height);
+        if (g_plugin.IsD3D12Active() && !s_fullscreen)
+            ::SetTimer(get_wnd(), WM_MILK2_REPAIR_WINDOWED_DX12, 180, nullptr);
 #ifdef TIMER_TP
         LeaveCriticalSection(&s_cs);
 #endif
@@ -439,7 +446,11 @@ void milk2_ui_element::OnExitSizeMove()
 #endif
         RECT rc;
         WIN32_OP_D(GetClientRect(&rc));
-        g_plugin.OnWindowSizeChanged(rc.right - rc.left, rc.bottom - rc.top);
+        const int width = std::max<int>(rc.right - rc.left, 128);
+        const int height = std::max<int>(rc.bottom - rc.top, 128);
+        g_plugin.OnWindowSizeChanged(width, height);
+        if (g_plugin.IsD3D12Active() && !s_fullscreen)
+            ::SetTimer(get_wnd(), WM_MILK2_REPAIR_WINDOWED_DX12, 180, nullptr);
 #ifdef TIMER_TP
         LeaveCriticalSection(&s_cs);
 #endif
@@ -929,6 +940,43 @@ LRESULT milk2_ui_element::OnRestoreWindowed(UINT uMsg, WPARAM wParam, LPARAM lPa
     return 0;
 }
 
+LRESULT milk2_ui_element::OnRepairWindowedD3D12(UINT uMsg, WPARAM wParam, LPARAM lParam)
+{
+    UNREFERENCED_PARAMETER(wParam);
+    UNREFERENCED_PARAMETER(lParam);
+
+    if (uMsg != WM_MILK2_REPAIR_WINDOWED_DX12)
+        return -1;
+
+    if (s_fullscreen || !m_milk2 || !g_plugin.IsD3D12Active())
+        return 0;
+
+    CRect r{};
+    if (!::GetClientRect(get_wnd(), &r) || r.right - r.left <= 0 || r.bottom - r.top <= 0)
+        return 0;
+
+    const int width = std::max<int>(r.right - r.left, 128);
+    const int height = std::max<int>(r.bottom - r.top, 128);
+
+#ifdef TIMER_TP
+    if (TryEnterCriticalSection(&s_cs) == 0)
+        return 0;
+#endif
+    g_plugin.CaptureD3D12VisualState();
+    if (g_plugin.RestartD3D12ForWindow(get_wnd(), width, height, WINDOWED))
+    {
+        g_plugin.RestoreD3D12VisualState();
+        g_plugin.ResumeD3D12AfterWindowSwap();
+    }
+#ifdef TIMER_TP
+    LeaveCriticalSection(&s_cs);
+#endif
+
+    ::PostMessage(get_wnd(), WM_MILK2_RENDER, 0, 0);
+    InvalidateRect(nullptr, FALSE);
+    return 0;
+}
+
 LRESULT milk2_ui_element::OnConfigurationChange(UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
     UNREFERENCED_PARAMETER(lParam);
@@ -985,6 +1033,11 @@ bool milk2_ui_element::Initialize(HWND window, int width, int height)
 
         if (FALSE == g_plugin.PluginInitialize(width, height))
             return false;
+        if (g_plugin.IsD3D12Active())
+        {
+            g_plugin.RestoreD3D12VisualState();
+            g_plugin.ResumeD3D12AfterWindowSwap();
+        }
 
         HICON hIcon = ::LoadIcon(_AtlBaseModule.GetResourceInstance(), MAKEINTRESOURCE(IDI_MILK2_ICON));
         HWND parent = GetRealParent(get_wnd());
@@ -1014,6 +1067,7 @@ bool milk2_ui_element::Initialize(HWND window, int width, int height)
 #endif
         if (rebuildD3D12)
         {
+            g_plugin.CaptureD3D12VisualState();
             g_plugin.PluginQuit();
             s_milk2 = false;
             if (!initializeFreshPlugin())
@@ -1042,6 +1096,8 @@ bool milk2_ui_element::Initialize(HWND window, int width, int height)
     StartTimer();
     ::PostMessage(get_wnd(), WM_MILK2_RENDER, 0, 0);
 #endif
+    if (!s_fullscreen && g_plugin.IsD3D12Active())
+        ::SetTimer(get_wnd(), WM_MILK2_REPAIR_WINDOWED_DX12, 250, nullptr);
 
     return true;
 }

@@ -20,6 +20,13 @@ Optional DX12 development flags used during portable testing:
 $env:FOO_VIS_MILK2_DX12_TEXTURE_CYCLE = "1"
 $env:FOO_VIS_MILK2_DX12_TEXTURE_CYCLE_MS = "3000"
 $env:FOO_VIS_MILK2_DX12_POSTPROCESS = "1"
+$env:FOO_VIS_MILK2_DX12_OVERLAY = "1"
+```
+
+DX12 swap-chain resizing during normal embedded foobar2000 window move/resize is disabled by default because it can block the foobar2000 UI thread in DXGI/driver waits. Fullscreen transitions still perform a real DX12 target resize, and the embedded panel is rebuilt after startup/fullscreen return so rendering resumes in the hosted window. To compare the old resize path during debugging only:
+
+```powershell
+$env:FOO_VIS_MILK2_DX12_RESIZE_SWAPCHAIN = "1"
 ```
 
 The current DX12 development path can:
@@ -38,7 +45,9 @@ The current DX12 development path can:
 - run preset per-frame equations on the DX12 path;
 - apply an experimental texture/feedback warp mesh from the MilkDrop per-pixel grid;
 - apply an experimental postprocess pass for gamma, brighten, darken, solarize, invert, and first `fShader` approximation when `FOO_VIS_MILK2_DX12_POSTPROCESS=1`;
-- enter fullscreen and return to the hosted windowed foobar2000 panel without leaving the panel render loop stopped.
+- draw a simple native D3D12 bitmap text overlay for preset name, track title, and FPS, with `FOO_VIS_MILK2_DX12_OVERLAY=1` forcing it on during portable testing;
+- enter fullscreen and return to the hosted windowed foobar2000 panel without leaving the panel render loop stopped;
+- survive normal foobar2000 window move, resize, maximize, fullscreen, and return-to-windowed testing without using the blocking DXGI resize path for embedded window moves.
 
 The current DX12 path is still incomplete. It does not yet provide full MilkDrop rendering parity and should be treated as active renderer development.
 
@@ -50,7 +59,7 @@ The following areas still need renderer work:
 - full shader reflection and resource binding replacement for the old D3D11 constant-table path;
 - complete render-to-texture feedback, blur chain, and video echo parity;
 - complete MilkDrop shape, border, motion vector, custom wave, and sprite rendering parity;
-- DirectWrite/Direct2D text rendering in the DX12 path;
+- full DirectWrite/Direct2D text rendering parity in the DX12 path beyond the current native bitmap overlay;
 - compressed and less common DDS/TGA texture variants;
 - multi-texture preset sampler binding beyond the current first usable texture selection;
 - feature parity with the current working live DX11 component.
@@ -171,7 +180,7 @@ Do not test this by replacing a working live foobar2000 install unless you have 
 
 The current postprocess and texture/feedback warp work is experimental. If DX12 rendering behaves unexpectedly, disable `FOO_VIS_MILK2_DX12_POSTPROCESS`, use the safe portable launcher, or restart the affected process/session before continuing.
 
-Fullscreen transitions are supported in the DX12 development path. The component explicitly restores the original hosted panel after foobar2000 destroys the temporary fullscreen visualization window, then rebuilds the DX12 runtime for that windowed panel.
+Fullscreen transitions are supported in the DX12 development path. The component explicitly restores the original hosted panel after foobar2000 destroys the temporary fullscreen visualization window, then rebuilds the DX12 runtime for that windowed panel. Normal embedded foobar2000 window resizing intentionally updates the logical client size without resizing the DX12 swap chain; this avoids hangs seen when DXGI waits inside the host UI thread.
 
 The current recommended workflow is:
 

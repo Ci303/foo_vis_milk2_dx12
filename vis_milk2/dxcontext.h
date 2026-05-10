@@ -85,8 +85,42 @@ class DXContext final
     bool SetTextureFiles(const wchar_t* const* textureFiles, size_t textureFileCount);
     bool SetPresetTextureFiles(const wchar_t* const* textureFiles, size_t textureFileCount);
     void ClearPresetTextureOverride();
+    bool SetD3D12PresetCompositeShader(const void* bytecode, size_t bytecodeSize);
+    void ClearD3D12PresetCompositeShader();
+    void SetD3D12PresetShaderRuntimeConstants(float time,
+                                              float fps,
+                                              float frame,
+                                              float progress,
+                                              float bass,
+                                              float mids,
+                                              float treble,
+                                              float bassAtt,
+                                              float midsAtt,
+                                              float trebleAtt,
+                                              const float* qValues,
+                                              const float* randFrame,
+                                              const float* randPreset,
+                                              const float* blurMin,
+                                              const float* blurMax,
+                                              const float* rotMatrices);
+    bool CaptureD3D12Frame(std::vector<uint8_t>* pixels, UINT* width, UINT* height);
+    bool SetD3D12ResumeFeedback(UINT width, UINT height, const std::vector<uint8_t>& pixels);
+    void SetD3D12TextOverlay(const wchar_t* topLeft,
+                             const wchar_t* topRight,
+                             const wchar_t* bottomLeft,
+                             const wchar_t* debugLine = nullptr,
+                             const wchar_t* centerText = nullptr,
+                             float centerX = 0.5f,
+                             float centerY = 0.5f,
+                             float centerScale = 1.0f,
+                             float centerR = 1.0f,
+                             float centerG = 1.0f,
+                             float centerB = 1.0f,
+                             float centerA = 0.0f);
     void DrawWaveform(const float* left,
                       const float* right,
+                      const float* spectrumLeft,
+                      const float* spectrumRight,
                       size_t sampleCount,
                       float bass,
                       float mids,
@@ -117,6 +151,8 @@ class DXContext final
                       bool waveBrighten = false,
                       int waveMode = 0,
                       float waveParam = 0.0f,
+                      float waveSmoothing = 0.0f,
+                      float waveAlphaVolumeScale = 1.0f,
                       bool darkenCenter = false,
                       float postGamma = 1.0f,
                       bool postInvert = false,
@@ -124,6 +160,7 @@ class DXContext final
                       bool postDarken = false,
                       bool postSolarize = false,
                       float postShaderAmount = 0.0f,
+                      const float* postHueShaderColors = nullptr,
                       float postBlurAmount = 0.0f,
                       float postBlurEdgeDarken = 0.25f,
                       float outerBorderSize = 0.0f,
@@ -152,7 +189,9 @@ class DXContext final
                       const DX::CustomWaveDrawCommand* customWaveDraws = nullptr,
                       size_t customWaveDrawCount = 0,
                       const DX::TextureWarpVertex* textureWarpVertices = nullptr,
-                      size_t textureWarpVertexCount = 0);
+                      size_t textureWarpVertexCount = 0,
+                      int textureWarpGridX = 0,
+                      int textureWarpGridY = 0);
     void RestoreTarget();
     int GetBitDepth() const { return m_bpp; };
 
@@ -188,6 +227,10 @@ class DXContext final
     bool RecreateD3D12ResourcesForWindow(HWND window, int width, int height);
 
     bool m_useD3D12;
+    bool m_d3d12ResizeSwapChain = false;
+    bool m_d3d12ResizePending = false;
+    int m_d3d12PendingWidth = 0;
+    int m_d3d12PendingHeight = 0;
     std::unique_ptr<DX::DeviceResources> m_deviceResources;
     std::unique_ptr<DX::D3D12Resources> m_d3d12Resources;
 };
