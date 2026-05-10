@@ -31,6 +31,19 @@
 #include "pch.h"
 #include "dxcontext.h"
 
+namespace
+{
+bool IsEnvFlagEnabled(const wchar_t* name, bool defaultValue = false)
+{
+    wchar_t value[8]{};
+    const DWORD length = GetEnvironmentVariableW(name, value, static_cast<DWORD>(std::size(value)));
+    if (length == 0)
+        return defaultValue;
+
+    return wcscmp(value, L"0") != 0;
+}
+}
+
 DXContext::DXContext(HWND hWndWinamp, DXCONTEXT_PARAMS* pParams) noexcept(false)
 {
     m_hwnd = hWndWinamp;
@@ -45,8 +58,8 @@ DXContext::DXContext(HWND hWndWinamp, DXCONTEXT_PARAMS* pParams) noexcept(false)
 
     // Clear the active flag.
     m_ready = FALSE;
-    wchar_t dx12Mode[8]{};
-    m_useD3D12 = GetEnvironmentVariableW(L"FOO_VIS_MILK2_DX12_DEV", dx12Mode, static_cast<DWORD>(std::size(dx12Mode))) > 0 && wcscmp(dx12Mode, L"0") != 0;
+    m_useD3D12 = IsEnvFlagEnabled(L"FOO_VIS_MILK2_DX12_DEV");
+    m_d3d12ResizeSwapChain = IsEnvFlagEnabled(L"FOO_VIS_MILK2_DX12_RESIZE_SWAPCHAIN");
 
     // Create the device.
     // Provide parameters for swap chain format, depth/stencil format, and back buffer count.
@@ -304,6 +317,22 @@ void DXContext::DrawWaveform(const float* left,
 {
     if (m_useD3D12)
     {
+        if (m_d3d12ResizePending)
+        {
+            try
+            {
+                if (m_d3d12Resources->WindowSizeChanged(m_d3d12PendingWidth, m_d3d12PendingHeight))
+                {
+                    m_client_width = m_d3d12PendingWidth;
+                    m_client_height = m_d3d12PendingHeight;
+                }
+            }
+            catch (...)
+            {
+            }
+            m_d3d12ResizePending = false;
+        }
+
         m_d3d12Resources->DrawWaveform(left, right, sampleCount, bass, mids, treble, waveR, waveG, waveB, waveA, waveScale, waveX, waveY, decay, zoom, rot, motionCenterX, motionCenterY, motionDX, motionDY, motionStretchX, motionStretchY, motionWarp, echoAlpha, echoZoom, echoOrientation, waveUseDots, waveThick, waveAdditive, waveBrighten, waveMode, waveParam, darkenCenter, postGamma, postInvert, postBrighten, postDarken, postSolarize, postShaderAmount, postBlurAmount, postBlurEdgeDarken, outerBorderSize, outerBorderR, outerBorderG, outerBorderB, outerBorderA, innerBorderSize, innerBorderR, innerBorderG, innerBorderB, innerBorderA, motionVectorX, motionVectorY, motionVectorDX, motionVectorDY, motionVectorLength, motionVectorR, motionVectorG, motionVectorB, motionVectorA, customShapes, customShapeCount, customWaveVertices, customWaveVertexCount, customWaveDraws, customWaveDrawCount, textureWarpVertices, textureWarpVertexCount);
     }
 }
@@ -345,11 +374,11 @@ BOOL DXContext::StartOrRestartDevice(DXCONTEXT_PARAMS* pParams)
 
 void DXContext::OnWindowMoved()
 {
-    auto const r = m_useD3D12 ? m_d3d12Resources->GetOutputSize() : m_deviceResources->GetOutputSize();
     if (m_useD3D12)
-        m_d3d12Resources->WindowSizeChanged(r.right, r.bottom);
-    else
-        m_deviceResources->WindowSizeChanged(r.right, r.bottom);
+        return;
+
+    auto const r = m_useD3D12 ? m_d3d12Resources->GetOutputSize() : m_deviceResources->GetOutputSize();
+    m_deviceResources->WindowSizeChanged(r.right, r.bottom);
 }
 
 void DXContext::OnDisplayChange()
@@ -369,10 +398,36 @@ BOOL DXContext::OnWindowSizeChanged(int width, int height)
     if ((m_client_width == width) && (m_client_height == height))
         return TRUE;
 
+    if (m_useD3D12)
+    {
+        m_client_width = std::max(width, 1);
+        m_client_height = std::max(height, 1);
+
+        const bool allowSwapChainResize = m_d3d12ResizeSwapChain || m_current_mode.screenmode == FULLSCREEN;
+        if (!allowSwapChainResize)
+        {
+            m_d3d12ResizePending = false;
+            return TRUE;
+        }
+
+        m_d3d12PendingWidth = m_client_width;
+        m_d3d12PendingHeight = m_client_height;
+        m_d3d12ResizePending = true;
+        return TRUE;
+    }
+
     m_client_width = width;
     m_client_height = height;
 
-    const bool resized = m_useD3D12 ? m_d3d12Resources->WindowSizeChanged(width, height) : m_deviceResources->WindowSizeChanged(width, height);
+    bool resized = false;
+    try
+    {
+        resized = m_deviceResources->WindowSizeChanged(width, height);
+    }
+    catch (...)
+    {
+        resized = false;
+    }
     if (!resized)
     {
         m_lastErr = DX_ERR_RESIZEFAILED;
@@ -380,8 +435,7 @@ BOOL DXContext::OnWindowSizeChanged(int width, int height)
         return FALSE;
     }
 
-    if (!m_useD3D12)
-        CreateWindowSizeDependentResources();
+    CreateWindowSizeDependentResources();
 
     m_ready = TRUE;
     return TRUE;

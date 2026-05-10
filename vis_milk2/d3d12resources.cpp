@@ -201,7 +201,10 @@ void D3D12Resources::CreateWindowSizeDependentResources()
         throw std::logic_error("Call SetWindow with a valid Win32 window handle");
     }
 
-    WaitForGpu();
+    if (!WaitForGpu(1000))
+    {
+        throw std::runtime_error("Timed out waiting for the D3D12 GPU before resizing");
+    }
     for (auto& renderTarget : m_renderTargets)
     {
         renderTarget.Reset();
@@ -264,6 +267,11 @@ bool D3D12Resources::WindowSizeChanged(int width, int height)
     newRc.right = static_cast<long>(std::max(width, 1));
     newRc.bottom = static_cast<long>(std::max(height, 1));
     if (newRc.right == m_outputSize.right && newRc.bottom == m_outputSize.bottom)
+    {
+        return false;
+    }
+
+    if (!WaitForGpu(1000))
     {
         return false;
     }

@@ -189,6 +189,10 @@ class DXContext final
     bool RecreateD3D12ResourcesForWindow(HWND window, int width, int height);
 
     bool m_useD3D12;
+    bool m_d3d12ResizeSwapChain = false;
+    bool m_d3d12ResizePending = false;
+    int m_d3d12PendingWidth = 0;
+    int m_d3d12PendingHeight = 0;
     std::unique_ptr<DX::DeviceResources> m_deviceResources;
     std::unique_ptr<DX::D3D12Resources> m_d3d12Resources;
 };
