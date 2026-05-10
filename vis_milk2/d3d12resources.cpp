@@ -6,6 +6,7 @@
 #include "d3d12resources.h"
 #include "deviceresources.h"
 
+#include <array>
 #include <wincodec.h>
 #include <fstream>
 
@@ -29,6 +30,65 @@ uint32_t ReadLe32(const uint8_t* data) noexcept
            (static_cast<uint32_t>(data[1]) << 8) |
            (static_cast<uint32_t>(data[2]) << 16) |
            (static_cast<uint32_t>(data[3]) << 24);
+}
+
+std::array<uint8_t, 7> GlyphRows(wchar_t ch) noexcept
+{
+    switch (towupper(ch))
+    {
+        case L'0': return {0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E};
+        case L'1': return {0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E};
+        case L'2': return {0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F};
+        case L'3': return {0x1E, 0x01, 0x01, 0x0E, 0x01, 0x01, 0x1E};
+        case L'4': return {0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02};
+        case L'5': return {0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E};
+        case L'6': return {0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E};
+        case L'7': return {0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08};
+        case L'8': return {0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E};
+        case L'9': return {0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C};
+        case L'A': return {0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11};
+        case L'B': return {0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E};
+        case L'C': return {0x0E, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0E};
+        case L'D': return {0x1E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1E};
+        case L'E': return {0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F};
+        case L'F': return {0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10};
+        case L'G': return {0x0E, 0x11, 0x10, 0x17, 0x11, 0x11, 0x0F};
+        case L'H': return {0x11, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11};
+        case L'I': return {0x0E, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0E};
+        case L'J': return {0x07, 0x02, 0x02, 0x02, 0x12, 0x12, 0x0C};
+        case L'K': return {0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11};
+        case L'L': return {0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F};
+        case L'M': return {0x11, 0x1B, 0x15, 0x15, 0x11, 0x11, 0x11};
+        case L'N': return {0x11, 0x19, 0x15, 0x13, 0x11, 0x11, 0x11};
+        case L'O': return {0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E};
+        case L'P': return {0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10};
+        case L'Q': return {0x0E, 0x11, 0x11, 0x11, 0x15, 0x12, 0x0D};
+        case L'R': return {0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11};
+        case L'S': return {0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E};
+        case L'T': return {0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04};
+        case L'U': return {0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E};
+        case L'V': return {0x11, 0x11, 0x11, 0x11, 0x11, 0x0A, 0x04};
+        case L'W': return {0x11, 0x11, 0x11, 0x15, 0x15, 0x15, 0x0A};
+        case L'X': return {0x11, 0x11, 0x0A, 0x04, 0x0A, 0x11, 0x11};
+        case L'Y': return {0x11, 0x11, 0x0A, 0x04, 0x04, 0x04, 0x04};
+        case L'Z': return {0x1F, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1F};
+        case L'.': return {0x00, 0x00, 0x00, 0x00, 0x00, 0x0C, 0x0C};
+        case L',': return {0x00, 0x00, 0x00, 0x00, 0x0C, 0x04, 0x08};
+        case L':': return {0x00, 0x0C, 0x0C, 0x00, 0x0C, 0x0C, 0x00};
+        case L'-': return {0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00};
+        case L'_': return {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1F};
+        case L'/': return {0x01, 0x01, 0x02, 0x04, 0x08, 0x10, 0x10};
+        case L'\\': return {0x10, 0x10, 0x08, 0x04, 0x02, 0x01, 0x01};
+        case L'(': return {0x02, 0x04, 0x08, 0x08, 0x08, 0x04, 0x02};
+        case L')': return {0x08, 0x04, 0x02, 0x02, 0x02, 0x04, 0x08};
+        case L'[': return {0x0E, 0x08, 0x08, 0x08, 0x08, 0x08, 0x0E};
+        case L']': return {0x0E, 0x02, 0x02, 0x02, 0x02, 0x02, 0x0E};
+        case L'+': return {0x00, 0x04, 0x04, 0x1F, 0x04, 0x04, 0x00};
+        case L'!': return {0x04, 0x04, 0x04, 0x04, 0x04, 0x00, 0x04};
+        case L'?': return {0x0E, 0x11, 0x01, 0x02, 0x04, 0x00, 0x04};
+        case L' ': return {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+        default: return {0x1F, 0x11, 0x15, 0x15, 0x15, 0x11, 0x1F};
+    }
 }
 } // namespace
 
@@ -312,6 +372,13 @@ void D3D12Resources::ResetVisualHistory()
         Clear();
         Present();
     }
+}
+
+void D3D12Resources::SetTextOverlay(const wchar_t* topLeft, const wchar_t* topRight, const wchar_t* bottomLeft)
+{
+    m_overlayTopLeft = topLeft ? topLeft : L"";
+    m_overlayTopRight = topRight ? topRight : L"";
+    m_overlayBottomLeft = bottomLeft ? bottomLeft : L"";
 }
 
 bool D3D12Resources::SetTextureFilesInternal(const wchar_t* const* textureFiles, size_t textureFileCount, bool presetTextureOverride)
@@ -1348,9 +1415,114 @@ void D3D12Resources::DrawWaveform(const float* left,
 
     CopyBackBufferToFeedback(m_feedbackIndex);
 
-    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
-    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
-    m_commandList->ResourceBarrier(1, &barrier);
+    UINT textOverlayVertexStart = customWaveVertexStart + customWaveVertexCopiedCount;
+    UINT textOverlayVertexCount = 0;
+    const float outputWidth = static_cast<float>(std::max<long>(m_outputSize.right - m_outputSize.left, 1));
+    const float outputHeight = static_cast<float>(std::max<long>(m_outputSize.bottom - m_outputSize.top, 1));
+    const float textScale = static_cast<float>(std::clamp(static_cast<int>(outputHeight / 180.0f), 2, 4));
+    const float textCell = textScale;
+    const float glyphAdvance = 6.0f * textCell;
+    const float glyphHeight = 7.0f * textCell;
+
+    auto writeTextVertex = [&](float pixelXPos, float pixelYPos, float r, float g, float b, float a) {
+        if (textOverlayVertexStart + textOverlayVertexCount >= c_maxWaveformVertices)
+        {
+            return false;
+        }
+
+        WaveformVertex& vertex = m_mappedWaveformVertices[textOverlayVertexStart + textOverlayVertexCount++];
+        vertex.position[0] = pixelXPos / outputWidth * 2.0f - 1.0f;
+        vertex.position[1] = 1.0f - pixelYPos / outputHeight * 2.0f;
+        vertex.color[0] = r;
+        vertex.color[1] = g;
+        vertex.color[2] = b;
+        vertex.color[3] = a;
+        return true;
+    };
+
+    auto writeTextQuad = [&](float x0, float y0, float x1, float y1, float r, float g, float b, float a) {
+        const UINT before = textOverlayVertexCount;
+        if (!writeTextVertex(x0, y0, r, g, b, a) ||
+            !writeTextVertex(x1, y0, r, g, b, a) ||
+            !writeTextVertex(x0, y1, r, g, b, a) ||
+            !writeTextVertex(x0, y1, r, g, b, a) ||
+            !writeTextVertex(x1, y0, r, g, b, a) ||
+            !writeTextVertex(x1, y1, r, g, b, a))
+        {
+            textOverlayVertexCount = before;
+        }
+    };
+
+    auto appendTextLine = [&](const std::wstring& text, float x, float y, float maxWidth, float r, float g, float b, float a) {
+        if (text.empty() || maxWidth <= glyphAdvance)
+        {
+            return;
+        }
+
+        const size_t maxChars = static_cast<size_t>(std::max<float>(1.0f, floorf(maxWidth / glyphAdvance)));
+        const size_t charCount = std::min(text.size(), maxChars);
+        for (size_t charIndex = 0; charIndex < charCount; ++charIndex)
+        {
+            const auto rows = GlyphRows(text[charIndex]);
+            const float charX = x + static_cast<float>(charIndex) * glyphAdvance;
+            for (size_t row = 0; row < rows.size(); ++row)
+            {
+                for (int col = 0; col < 5; ++col)
+                {
+                    if ((rows[row] & (1 << (4 - col))) == 0)
+                    {
+                        continue;
+                    }
+
+                    const float px = charX + static_cast<float>(col) * textCell;
+                    const float py = y + static_cast<float>(row) * textCell;
+                    writeTextQuad(px + 1.0f, py + 1.0f, px + textCell + 1.0f, py + textCell + 1.0f, 0.0f, 0.0f, 0.0f, a * 0.55f);
+                    writeTextQuad(px, py, px + textCell, py + textCell, r, g, b, a);
+                }
+            }
+        }
+    };
+
+    if (!m_overlayTopLeft.empty())
+    {
+        const float maxWidth = m_overlayTopRight.empty() ? outputWidth - 16.0f : outputWidth * 0.62f;
+        appendTextLine(m_overlayTopLeft, 8.0f, 8.0f, maxWidth, 0.92f, 0.96f, 1.0f, 0.88f);
+    }
+    if (!m_overlayTopRight.empty())
+    {
+        const float maxWidth = outputWidth * 0.35f;
+        const size_t chars = std::min(m_overlayTopRight.size(), static_cast<size_t>(std::max<float>(1.0f, floorf(maxWidth / glyphAdvance))));
+        const float textWidth = static_cast<float>(chars) * glyphAdvance;
+        appendTextLine(m_overlayTopRight, std::max(8.0f, outputWidth - textWidth - 8.0f), 8.0f, maxWidth, 0.86f, 1.0f, 0.72f, 0.88f);
+    }
+    if (!m_overlayBottomLeft.empty())
+    {
+        appendTextLine(m_overlayBottomLeft, 8.0f, std::max(8.0f, outputHeight - glyphHeight - 8.0f), outputWidth - 16.0f, 0.95f, 0.92f, 0.78f, 0.86f);
+    }
+
+    if (textOverlayVertexCount > 0)
+    {
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        m_commandList->ResourceBarrier(1, &barrier);
+
+        m_commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
+        m_commandList->SetPipelineState(m_solidPipelineState.Get());
+        m_commandList->SetGraphicsRootSignature(m_waveformRootSignature.Get());
+        m_commandList->IASetVertexBuffers(0, 1, &m_waveformVertexBufferView);
+        m_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        m_commandList->DrawInstanced(textOverlayVertexCount, 1, textOverlayVertexStart, 0);
+
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
+        m_commandList->ResourceBarrier(1, &barrier);
+    }
+    else
+    {
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
+        m_commandList->ResourceBarrier(1, &barrier);
+    }
 
     ThrowIfFailed(m_commandList->Close());
     ID3D12CommandList* commandLists[] = {m_commandList.Get()};

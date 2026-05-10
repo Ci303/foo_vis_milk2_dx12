@@ -90,6 +90,7 @@ class D3D12Resources
     bool SetPresetTextureFiles(const wchar_t* const* textureFiles, size_t textureFileCount);
     void ClearPresetTextureOverride();
     void ResetVisualHistory();
+    void SetTextOverlay(const wchar_t* topLeft, const wchar_t* topRight, const wchar_t* bottomLeft);
     void Clear();
     void DrawWaveform(const float* left,
                       const float* right,
@@ -339,6 +340,9 @@ class D3D12Resources
     size_t m_textureCycleIndex = 0;
     ULONGLONG m_lastTextureCycleTick = 0;
     bool m_presetTextureOverride = false;
+    std::wstring m_overlayTopLeft;
+    std::wstring m_overlayTopRight;
+    std::wstring m_overlayBottomLeft;
     Microsoft::WRL::ComPtr<ID3D12Fence> m_fence;
     UINT64 m_fenceValues[c_maxBackBufferCount]{};
     HANDLE m_fenceEvent = nullptr;

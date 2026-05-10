@@ -85,6 +85,7 @@ class DXContext final
     bool SetTextureFiles(const wchar_t* const* textureFiles, size_t textureFileCount);
     bool SetPresetTextureFiles(const wchar_t* const* textureFiles, size_t textureFileCount);
     void ClearPresetTextureOverride();
+    void SetD3D12TextOverlay(const wchar_t* topLeft, const wchar_t* topRight, const wchar_t* bottomLeft);
     void DrawWaveform(const float* left,
                       const float* right,
                       size_t sampleCount,

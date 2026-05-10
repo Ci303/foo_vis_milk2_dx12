@@ -225,6 +225,14 @@ void DXContext::ClearPresetTextureOverride()
     }
 }
 
+void DXContext::SetD3D12TextOverlay(const wchar_t* topLeft, const wchar_t* topRight, const wchar_t* bottomLeft)
+{
+    if (m_useD3D12 && m_d3d12Resources)
+    {
+        m_d3d12Resources->SetTextOverlay(topLeft, topRight, bottomLeft);
+    }
+}
+
 void DXContext::DrawWaveform(const float* left,
                              const float* right,
                              size_t sampleCount,

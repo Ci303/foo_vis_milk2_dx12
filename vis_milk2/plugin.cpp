@@ -3932,6 +3932,18 @@ void CPlugin::MilkDropRenderFrame(int redraw)
             }
         }
 
+        wchar_t dx12OverlayEnabled[8]{};
+        const bool forceDx12Overlay = GetEnvironmentVariableW(L"FOO_VIS_MILK2_DX12_OVERLAY", dx12OverlayEnabled, static_cast<DWORD>(std::size(dx12OverlayEnabled))) > 0 &&
+                                      wcscmp(dx12OverlayEnabled, L"0") != 0;
+        wchar_t dx12FpsText[64]{};
+        if (m_bShowFPS || forceDx12Overlay)
+        {
+            swprintf_s(dx12FpsText, L"%.1f FPS", GetFps());
+        }
+        const wchar_t* dx12PresetText = ((m_bShowPresetInfo || forceDx12Overlay) && m_pState && m_pState->m_szDesc[0]) ? m_pState->m_szDesc : L"";
+        const wchar_t* dx12SongText = ((m_bShowSongTitle || forceDx12Overlay) && m_szSongTitle[0]) ? m_szSongTitle : L"";
+        m_lpDX->SetD3D12TextOverlay(dx12PresetText, dx12FpsText, dx12SongText);
+
         m_lpDX->DrawWaveform(m_sound.fWaveform[0].data(),
                              m_sound.fWaveform[1].data(),
                              NUM_AUDIO_BUFFER_SAMPLES,
