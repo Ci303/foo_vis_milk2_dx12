@@ -210,23 +210,41 @@ void CState::Initialize()
     // it is a SUBSET of the per-vertex calculation variable list.
     m_pf_codehandle = NULL;
     m_pp_codehandle = NULL;
-    m_pf_eel = NSEEL_VM_alloc();
-    m_pv_eel = NSEEL_VM_alloc();
     for (int i = 0; i < MAX_CUSTOM_WAVES; i++)
     {
         m_wave[i].m_pf_codehandle = NULL;
         m_wave[i].m_pp_codehandle = NULL;
-        m_wave[i].m_pf_eel = NSEEL_VM_alloc();
-        m_wave[i].m_pp_eel = NSEEL_VM_alloc();
     }
     for (int i = 0; i < MAX_CUSTOM_SHAPES; i++)
     {
         m_shape[i].m_pf_codehandle = NULL;
-        m_shape[i].m_pf_eel = NSEEL_VM_alloc();
     }
+    EnsureEvalContexts();
     //RegisterBuiltInVariables();
 
     Default();
+}
+
+void CState::EnsureEvalContexts()
+{
+    if (!m_pf_eel)
+        m_pf_eel = NSEEL_VM_alloc();
+    if (!m_pv_eel)
+        m_pv_eel = NSEEL_VM_alloc();
+
+    for (int i = 0; i < MAX_CUSTOM_WAVES; i++)
+    {
+        if (!m_wave[i].m_pf_eel)
+            m_wave[i].m_pf_eel = NSEEL_VM_alloc();
+        if (!m_wave[i].m_pp_eel)
+            m_wave[i].m_pp_eel = NSEEL_VM_alloc();
+    }
+
+    for (int i = 0; i < MAX_CUSTOM_SHAPES; i++)
+    {
+        if (!m_shape[i].m_pf_eel)
+            m_shape[i].m_pf_eel = NSEEL_VM_alloc();
+    }
 }
 
 CState::~CState()
@@ -260,6 +278,8 @@ void CState::Finish()
 // clang-format off
 void CState::RegisterBuiltInVariables(int flags)
 {
+    EnsureEvalContexts();
+
     if (flags & RECOMPILE_PRESET_CODE)
     {
         NSEEL_VM_resetvars(m_pf_eel);

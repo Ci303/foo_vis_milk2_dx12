@@ -79,6 +79,7 @@ class CPluginShell : public DX::IDeviceNotify
     void PluginQuit();
     void OnWindowSizeChanged(int width, int height);
     void OnWindowSwap(HWND window, int width, int height);
+    bool RestartD3D12ForWindow(HWND window, int width, int height, eScrMode screenmode);
     void OnWindowMoved();
     void OnDisplayChange();
 
@@ -97,6 +98,7 @@ class CPluginShell : public DX::IDeviceNotify
     eScrMode GetScreenMode() const; // returns WINDOWED, FULLSCREEN, FAKE_FULLSCREEN, DESKTOP, or NOT_YET_KNOWN (if called before or during OverrideDefaults()).
     HWND GetWinampWindow() const; // returns handle to Winamp main window
     void SetWinampWindow(HWND window); // sets the Winamp main window handle
+    void SetScreenMode(eScrMode screenmode);
     HINSTANCE GetInstance() const; // returns handle to the plugin DLL module; used for things like loading resources (dialogs, bitmaps, icons...) that are built into the plugin.
     wchar_t* GetPluginsDirPath(); // usually returns 'c:\\program files\\winamp\\plugins\\'
     wchar_t* GetConfigIniFile(); // usually returns 'c:\\program files\\winamp\\plugins\\something.ini' - filename is determined from identifiers in "defines.h"
@@ -178,6 +180,7 @@ class CPluginShell : public DX::IDeviceNotify
     float m_fps; // current estimate of frames per second
     HWND m_hWndWinamp; // handle to Winamp window
     HINSTANCE m_hInstance; // handle to application instance
+    bool m_pluginInitialized = false;
 
   public:
     std::unique_ptr<DXContext> m_lpDX; // pointer to DXContext object

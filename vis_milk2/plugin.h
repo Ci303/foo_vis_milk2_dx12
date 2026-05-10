@@ -574,9 +574,11 @@ class CPlugin : public CPluginShell
 #else
     bool PanelSettings(plugin_config* settings);
 #endif
+    bool IsD3D12Active() const { return IsD3D12Mode(); }
     void LoadRandomPreset(float fBlendTime);
     void LoadPreset(const wchar_t* szPresetFilename, float fBlendTime);
     void LoadPresetTick();
+    void ResumeD3D12AfterWindowSwap();
     void SetPresetListPosition(std::wstring search);
     void FindValidPresetDir();
     wchar_t* GetPresetDir() const { return const_cast<wchar_t*>(m_szPresetDir); };

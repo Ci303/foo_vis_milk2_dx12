@@ -13,6 +13,25 @@ using Microsoft::WRL::ComPtr;
 
 namespace DX
 {
+namespace
+{
+constexpr uint32_t MakeFourCC(char a, char b, char c, char d) noexcept
+{
+    return static_cast<uint32_t>(static_cast<uint8_t>(a)) |
+           (static_cast<uint32_t>(static_cast<uint8_t>(b)) << 8) |
+           (static_cast<uint32_t>(static_cast<uint8_t>(c)) << 16) |
+           (static_cast<uint32_t>(static_cast<uint8_t>(d)) << 24);
+}
+
+uint32_t ReadLe32(const uint8_t* data) noexcept
+{
+    return static_cast<uint32_t>(data[0]) |
+           (static_cast<uint32_t>(data[1]) << 8) |
+           (static_cast<uint32_t>(data[2]) << 16) |
+           (static_cast<uint32_t>(data[3]) << 24);
+}
+} // namespace
+
 D3D12Resources::D3D12Resources(DXGI_FORMAT backBufferFormat, UINT backBufferCount, unsigned int flags) :
     m_backBufferFormat(backBufferFormat),
     m_backBufferCount(std::clamp(backBufferCount, 2u, c_maxBackBufferCount)),
@@ -24,19 +43,28 @@ D3D12Resources::~D3D12Resources()
 {
     if (m_commandQueue && m_fence)
     {
-        WaitForGpu();
+        WaitForGpu(1000);
     }
 
-    if (m_waveformVertexBuffer && m_mappedWaveformVertices)
+    for (UINT i = 0; i < c_maxBackBufferCount; ++i)
     {
-        m_waveformVertexBuffer->Unmap(0, nullptr);
-        m_mappedWaveformVertices = nullptr;
+        if (m_waveformVertexBuffers[i] && m_mappedWaveformVertexBuffers[i])
+        {
+            m_waveformVertexBuffers[i]->Unmap(0, nullptr);
+            m_mappedWaveformVertexBuffers[i] = nullptr;
+        }
     }
-    if (m_textureVertexBuffer && m_mappedTextureVertices)
+    m_mappedWaveformVertices = nullptr;
+
+    for (UINT i = 0; i < c_maxBackBufferCount; ++i)
     {
-        m_textureVertexBuffer->Unmap(0, nullptr);
-        m_mappedTextureVertices = nullptr;
+        if (m_textureVertexBuffers[i] && m_mappedTextureVertexBuffers[i])
+        {
+            m_textureVertexBuffers[i]->Unmap(0, nullptr);
+            m_mappedTextureVertexBuffers[i] = nullptr;
+        }
     }
+    m_mappedTextureVertices = nullptr;
 
     if (m_fenceEvent)
     {
@@ -187,11 +215,19 @@ bool D3D12Resources::WindowSizeChanged(int width, int height)
 
 bool D3D12Resources::WindowSwap(HWND window, int width, int height)
 {
-    WaitForGpu();
+    if (!WaitForGpu(1000))
+        return false;
     for (auto& renderTarget : m_renderTargets)
     {
         renderTarget.Reset();
     }
+    for (auto& feedbackTexture : m_feedbackTextures)
+    {
+        feedbackTexture.Reset();
+    }
+    m_postProcessTexture.Reset();
+    m_feedbackReady[0] = false;
+    m_feedbackReady[1] = false;
     m_swapChain.Reset();
 
     SetWindow(window, width, height);
@@ -199,8 +235,21 @@ bool D3D12Resources::WindowSwap(HWND window, int width, int height)
     return true;
 }
 
+std::vector<std::wstring> D3D12Resources::GetActiveTextureFiles() const
+{
+    std::vector<std::wstring> textureFiles;
+    textureFiles.reserve(m_activeTextureLayerCount);
+    for (UINT slot = 0; slot < m_activeTextureLayerCount && slot < c_maxTextureLayers; ++slot)
+    {
+        if (!m_textureSlots[slot].file.empty())
+            textureFiles.push_back(m_textureSlots[slot].file);
+    }
+    return textureFiles;
+}
+
 void D3D12Resources::SetTextureDirectory(const wchar_t* textureDirectory)
 {
+    m_presetTextureOverride = false;
     m_textureDirectory = textureDirectory ? textureDirectory : L"";
     if (!m_textureDirectory.empty() && m_textureDirectory.back() != L'\\' && m_textureDirectory.back() != L'/')
     {
@@ -213,7 +262,7 @@ void D3D12Resources::SetTextureDirectory(const wchar_t* textureDirectory)
         const std::wstring textureFile = PickTextureFile();
         if (!textureFile.empty())
         {
-            LoadTextureFromFile(textureFile.c_str());
+            SetTextureFile(textureFile.c_str());
         }
     }
 }
@@ -225,7 +274,103 @@ bool D3D12Resources::SetTextureFile(const wchar_t* textureFile)
         return false;
     }
 
-    return LoadTextureFromFile(textureFile);
+    const wchar_t* textureFiles[] = {textureFile};
+    return SetTextureFiles(textureFiles, std::size(textureFiles));
+}
+
+bool D3D12Resources::SetTextureFiles(const wchar_t* const* textureFiles, size_t textureFileCount)
+{
+    return SetTextureFilesInternal(textureFiles, textureFileCount, false);
+}
+
+bool D3D12Resources::SetPresetTextureFiles(const wchar_t* const* textureFiles, size_t textureFileCount)
+{
+    return SetTextureFilesInternal(textureFiles, textureFileCount, true);
+}
+
+void D3D12Resources::ClearPresetTextureOverride()
+{
+    m_presetTextureOverride = false;
+}
+
+void D3D12Resources::ResetVisualHistory()
+{
+    if (!m_swapChain || !m_commandQueue || !m_fence)
+    {
+        return;
+    }
+
+    WaitForGpu(1000);
+    m_feedbackReady[0] = false;
+    m_feedbackReady[1] = false;
+    m_feedbackIndex = 0;
+    m_lastTextureCycleTick = 0;
+
+    const UINT buffersToPrime = std::max<UINT>(m_backBufferCount, 1u);
+    for (UINT i = 0; i < buffersToPrime; ++i)
+    {
+        Clear();
+        Present();
+    }
+}
+
+bool D3D12Resources::SetTextureFilesInternal(const wchar_t* const* textureFiles, size_t textureFileCount, bool presetTextureOverride)
+{
+    if (!m_d3dDevice || !m_commandQueue || !textureFiles || textureFileCount == 0)
+    {
+        return false;
+    }
+
+    WaitForGpu();
+
+    UINT loadedCount = 0;
+    for (size_t index = 0; index < textureFileCount && loadedCount < c_maxTextureLayers; ++index)
+    {
+        const wchar_t* textureFile = textureFiles[index];
+        if (!textureFile || !*textureFile)
+        {
+            continue;
+        }
+
+        bool duplicate = false;
+        for (UINT existing = 0; existing < loadedCount; ++existing)
+        {
+            if (!_wcsicmp(m_textureSlots[existing].file.c_str(), textureFile))
+            {
+                duplicate = true;
+                break;
+            }
+        }
+        if (duplicate)
+        {
+            continue;
+        }
+
+        if (LoadTextureFromFile(textureFile, loadedCount))
+        {
+            ++loadedCount;
+        }
+    }
+
+    if (loadedCount == 0)
+    {
+        if (presetTextureOverride)
+        {
+            m_presetTextureOverride = false;
+        }
+        return false;
+    }
+
+    for (UINT slot = loadedCount; slot < c_maxTextureLayers; ++slot)
+    {
+        m_textureSlots[slot].texture.Reset();
+        m_textureSlots[slot].uploadBuffer.Reset();
+        m_textureSlots[slot].file.clear();
+    }
+    m_activeTextureLayerCount = loadedCount;
+    m_currentTextureFile = m_textureSlots[0].file;
+    m_presetTextureOverride = presetTextureOverride;
+    return true;
 }
 
 void D3D12Resources::Clear()
@@ -293,6 +438,8 @@ void D3D12Resources::DrawWaveform(const float* left,
                                   bool postDarken,
                                   bool postSolarize,
                                   float postShaderAmount,
+                                  float postBlurAmount,
+                                  float postBlurEdgeDarken,
                                   float outerBorderSize,
                                   float outerBorderR,
                                   float outerBorderG,
@@ -321,6 +468,11 @@ void D3D12Resources::DrawWaveform(const float* left,
                                   const TextureWarpVertex* textureWarpVertices,
                                   size_t textureWarpVertexCount)
 {
+    m_mappedWaveformVertices = m_mappedWaveformVertexBuffers[m_frameIndex];
+    m_waveformVertexBufferView = m_waveformVertexBufferViews[m_frameIndex];
+    m_mappedTextureVertices = m_mappedTextureVertexBuffers[m_frameIndex];
+    m_textureVertexBufferView = m_textureVertexBufferViews[m_frameIndex];
+
     if (!left || !right || !m_mappedWaveformVertices || !m_waveformPipelineState || !m_waveformAdditivePipelineState || !m_solidPipelineState || !m_solidAdditivePipelineState || !m_waveformRootSignature)
     {
         Clear();
@@ -349,6 +501,9 @@ void D3D12Resources::DrawWaveform(const float* left,
     echoOrientation = ((echoOrientation % 4) + 4) % 4;
     postGamma = std::clamp(postGamma, 0.0f, 8.0f);
     postShaderAmount = std::clamp(postShaderAmount, 0.0f, 1.0f);
+    postBlurAmount = std::clamp(postBlurAmount, 0.0f, 1.0f);
+    postBlurEdgeDarken = std::clamp(postBlurEdgeDarken, 0.0f, 1.0f);
+    const float activePostBlurAmount = IsPostProcessBlurEnabled() ? std::max(postBlurAmount, GetPostProcessBlurAmount()) : 0.0f;
     if (waveBrighten)
     {
         const float maxChannel = std::max({waveR, waveG, waveB});
@@ -396,7 +551,8 @@ void D3D12Resources::DrawWaveform(const float* left,
                                     postBrighten ||
                                     postDarken ||
                                     postSolarize ||
-                                   postShaderAmount > 0.001f);
+                                    postShaderAmount > 0.001f ||
+                                    activePostBlurAmount > 0.001f);
     const bool hasTextureWarpMesh = textureWarpVertices && textureWarpVertexCount >= 3;
 
     waveMode = ((waveMode % 8) + 8) % 8;
@@ -1029,7 +1185,7 @@ void D3D12Resources::DrawWaveform(const float* left,
         const bool flipV = echoOrientation >= 2;
         if (hasTextureWarpMesh)
         {
-            DrawTextureMeshFromSrv(feedbackSrv, m_feedbackSrvHeap.Get(), textureWarpVertices, textureWarpVertexCount, bass, mids, treble, decay);
+            DrawTextureMeshFromSrv(feedbackSrv, m_feedbackSrvHeap.Get(), textureWarpVertices, textureWarpVertexCount, bass, mids, treble, decay, feedbackAlphaScale);
         }
         else
         {
@@ -1037,9 +1193,20 @@ void D3D12Resources::DrawWaveform(const float* left,
         }
     }
 
-    if (hasTextureWarpMesh && m_texture && m_srvHeap && m_texturePipelineState && m_textureRootSignature)
+    if (hasTextureWarpMesh && m_srvHeap && m_texturePipelineState && m_textureRootSignature)
     {
-        DrawTextureMeshFromSrv(m_srvHeap->GetGPUDescriptorHandleForHeapStart(), m_srvHeap.Get(), textureWarpVertices, textureWarpVertexCount, bass, mids, treble, decay);
+        for (UINT layer = 0; layer < m_activeTextureLayerCount && layer < c_maxTextureLayers; ++layer)
+        {
+            if (!m_textureSlots[layer].texture)
+            {
+                continue;
+            }
+
+            auto textureSrv = m_srvHeap->GetGPUDescriptorHandleForHeapStart();
+            textureSrv.ptr += static_cast<SIZE_T>(layer) * m_srvDescriptorSize;
+            const float layerAlpha = layer == 0 ? 1.0f : std::clamp(0.34f / static_cast<float>(layer + 1), 0.08f, 0.34f);
+            DrawTextureMeshFromSrv(textureSrv, m_srvHeap.Get(), textureWarpVertices, textureWarpVertexCount, bass, mids, treble, decay, layerAlpha);
+        }
     }
     else
     {
@@ -1170,7 +1337,9 @@ void D3D12Resources::DrawWaveform(const float* left,
                                postDarken,
                                postSolarize,
                                postInvert,
-                               postShaderAmount);
+                               postShaderAmount,
+                               activePostBlurAmount,
+                               postBlurEdgeDarken);
 
         barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
         barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
@@ -1253,17 +1422,22 @@ void D3D12Resources::MoveToNextFrame()
     m_fenceValues[m_frameIndex] = currentFenceValue + 1;
 }
 
-void D3D12Resources::WaitForGpu()
+bool D3D12Resources::WaitForGpu(DWORD timeoutMs)
 {
     if (!m_commandQueue || !m_fence || !m_fenceEvent)
     {
-        return;
+        return true;
     }
 
     ThrowIfFailed(m_commandQueue->Signal(m_fence.Get(), m_fenceValues[m_frameIndex]));
     ThrowIfFailed(m_fence->SetEventOnCompletion(m_fenceValues[m_frameIndex], m_fenceEvent));
-    WaitForSingleObjectEx(m_fenceEvent, INFINITE, FALSE);
+    const DWORD waitResult = WaitForSingleObjectEx(m_fenceEvent, timeoutMs, FALSE);
+    if (waitResult != WAIT_OBJECT_0)
+    {
+        return false;
+    }
     ++m_fenceValues[m_frameIndex];
+    return true;
 }
 
 D3D12_CPU_DESCRIPTOR_HANDLE D3D12Resources::GetCurrentRenderTargetView() const noexcept
@@ -1320,10 +1494,11 @@ float4 PSMain(PSInput input) : SV_TARGET
     ThrowIfFailed(D3DCompile(shaderSource, sizeof(shaderSource), nullptr, nullptr, nullptr, "PSMain", "ps_5_0", compileFlags, 0, pixelShader.GetAddressOf(), errorBlob.GetAddressOf()));
 
     D3D12_DESCRIPTOR_HEAP_DESC srvHeapDesc{};
-    srvHeapDesc.NumDescriptors = 1;
+    srvHeapDesc.NumDescriptors = c_maxTextureLayers;
     srvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     srvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     ThrowIfFailed(m_d3dDevice->CreateDescriptorHeap(&srvHeapDesc, IID_PPV_ARGS(m_srvHeap.ReleaseAndGetAddressOf())));
+    m_srvDescriptorSize = m_d3dDevice->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 
     D3D12_DESCRIPTOR_RANGE range{};
     range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
@@ -1392,6 +1567,13 @@ float4 PSMain(PSInput input) : SV_TARGET
     psoDesc.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_ONE;
     ThrowIfFailed(m_d3dDevice->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(m_textureAdditivePipelineState.ReleaseAndGetAddressOf())));
 
+    const TextureVertex vertices[] = {
+        {{-1.0f, 1.0f}, {0.0f, 0.0f}, {0.55f, 0.55f, 0.55f, 0.32f}},
+        {{1.0f, 1.0f}, {1.0f, 0.0f}, {0.55f, 0.55f, 0.55f, 0.32f}},
+        {{-1.0f, -1.0f}, {0.0f, 1.0f}, {0.55f, 0.55f, 0.55f, 0.32f}},
+        {{1.0f, -1.0f}, {1.0f, 1.0f}, {0.55f, 0.55f, 0.55f, 0.32f}},
+    };
+
     D3D12_HEAP_PROPERTIES heapProps{};
     heapProps.Type = D3D12_HEAP_TYPE_UPLOAD;
 
@@ -1404,50 +1586,67 @@ float4 PSMain(PSInput input) : SV_TARGET
     bufferDesc.SampleDesc.Count = 1;
     bufferDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
 
-    ThrowIfFailed(m_d3dDevice->CreateCommittedResource(&heapProps,
-                                                       D3D12_HEAP_FLAG_NONE,
-                                                       &bufferDesc,
-                                                       D3D12_RESOURCE_STATE_GENERIC_READ,
-                                                       nullptr,
-                                                       IID_PPV_ARGS(m_textureVertexBuffer.ReleaseAndGetAddressOf())));
-    ThrowIfFailed(m_textureVertexBuffer->Map(0, nullptr, reinterpret_cast<void**>(&m_mappedTextureVertices)));
+    D3D12_RANGE readRange{0, 0};
+    for (UINT i = 0; i < m_backBufferCount; ++i)
+    {
+        ThrowIfFailed(m_d3dDevice->CreateCommittedResource(&heapProps,
+                                                           D3D12_HEAP_FLAG_NONE,
+                                                           &bufferDesc,
+                                                           D3D12_RESOURCE_STATE_GENERIC_READ,
+                                                           nullptr,
+                                                           IID_PPV_ARGS(m_textureVertexBuffers[i].ReleaseAndGetAddressOf())));
+        ThrowIfFailed(m_textureVertexBuffers[i]->Map(0, &readRange, reinterpret_cast<void**>(&m_mappedTextureVertexBuffers[i])));
+        memcpy(m_mappedTextureVertexBuffers[i], vertices, sizeof(vertices));
 
-    const TextureVertex vertices[] = {
-        {{-1.0f, 1.0f}, {0.0f, 0.0f}, {0.55f, 0.55f, 0.55f, 0.32f}},
-        {{1.0f, 1.0f}, {1.0f, 0.0f}, {0.55f, 0.55f, 0.55f, 0.32f}},
-        {{-1.0f, -1.0f}, {0.0f, 1.0f}, {0.55f, 0.55f, 0.55f, 0.32f}},
-        {{1.0f, -1.0f}, {1.0f, 1.0f}, {0.55f, 0.55f, 0.55f, 0.32f}},
-    };
-    memcpy(m_mappedTextureVertices, vertices, sizeof(vertices));
+        m_textureVertexBufferViews[i].BufferLocation = m_textureVertexBuffers[i]->GetGPUVirtualAddress();
+        m_textureVertexBufferViews[i].StrideInBytes = sizeof(TextureVertex);
+        m_textureVertexBufferViews[i].SizeInBytes = sizeof(TextureVertex) * c_maxTextureVertices;
+    }
 
-    m_textureVertexBufferView.BufferLocation = m_textureVertexBuffer->GetGPUVirtualAddress();
-    m_textureVertexBufferView.StrideInBytes = sizeof(TextureVertex);
-    m_textureVertexBufferView.SizeInBytes = sizeof(TextureVertex) * c_maxTextureVertices;
+    m_mappedTextureVertices = m_mappedTextureVertexBuffers[m_frameIndex];
+    m_textureVertexBufferView = m_textureVertexBufferViews[m_frameIndex];
 }
 
-bool D3D12Resources::LoadTextureFromFile(const wchar_t* textureFile)
+bool D3D12Resources::LoadTextureFromFile(const wchar_t* textureFile, UINT slotIndex)
 {
-    if (!textureFile || !*textureFile || !m_srvHeap)
+    if (!textureFile || !*textureFile || !m_srvHeap || slotIndex >= c_maxTextureLayers)
     {
         return false;
     }
 
-    if (!_wcsicmp(m_currentTextureFile.c_str(), textureFile))
+    TextureSlot& slot = m_textureSlots[slotIndex];
+    if (!_wcsicmp(slot.file.c_str(), textureFile) && slot.texture)
     {
         return true;
     }
 
     const wchar_t* ext = wcsrchr(textureFile, L'.');
-    const bool loaded = ext && !_wcsicmp(ext, L".tga") ? LoadTextureFromTga(textureFile) : LoadTextureFromWic(textureFile);
+    bool loaded = false;
+    if (ext && !_wcsicmp(ext, L".dds"))
+    {
+        loaded = LoadTextureFromDds(textureFile, slotIndex);
+    }
+    else if (ext && !_wcsicmp(ext, L".tga"))
+    {
+        loaded = LoadTextureFromTga(textureFile, slotIndex);
+    }
+    else
+    {
+        loaded = LoadTextureFromWic(textureFile, slotIndex);
+    }
     if (loaded)
     {
-        m_currentTextureFile = textureFile;
+        slot.file = textureFile;
+        if (slotIndex == 0)
+        {
+            m_currentTextureFile = textureFile;
+        }
         OutputDebugStringW((std::wstring(L"foo_vis_milk2 DX12 texture loaded: ") + textureFile + L"\n").c_str());
     }
     return loaded;
 }
 
-bool D3D12Resources::LoadTextureFromWic(const wchar_t* textureFile)
+bool D3D12Resources::LoadTextureFromWic(const wchar_t* textureFile, UINT slotIndex)
 {
     ComPtr<IWICImagingFactory> factory;
     HRESULT hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(factory.GetAddressOf()));
@@ -1487,10 +1686,10 @@ bool D3D12Resources::LoadTextureFromWic(const wchar_t* textureFile)
     std::vector<uint8_t> pixels(static_cast<size_t>(rowPitch) * height);
     ThrowIfFailed(converter->CopyPixels(nullptr, rowPitch, static_cast<UINT>(pixels.size()), pixels.data()));
 
-    return UploadTextureRGBA(width, height, pixels);
+    return UploadTextureRGBA(width, height, pixels, slotIndex);
 }
 
-bool D3D12Resources::LoadTextureFromTga(const wchar_t* textureFile)
+bool D3D12Resources::LoadTextureFromTga(const wchar_t* textureFile, UINT slotIndex)
 {
     std::ifstream file(textureFile, std::ios::binary);
     if (!file)
@@ -1597,15 +1796,158 @@ bool D3D12Resources::LoadTextureFromTga(const wchar_t* textureFile)
         return false;
     }
 
-    return UploadTextureRGBA(width, height, pixels);
+    return UploadTextureRGBA(width, height, pixels, slotIndex);
 }
 
-bool D3D12Resources::UploadTextureRGBA(UINT width, UINT height, const std::vector<uint8_t>& pixels)
+bool D3D12Resources::LoadTextureFromDds(const wchar_t* textureFile, UINT slotIndex)
 {
-    if (width == 0 || height == 0 || pixels.size() < static_cast<size_t>(width) * height * 4)
+    std::ifstream file(textureFile, std::ios::binary | std::ios::ate);
+    if (!file)
     {
         return false;
     }
+
+    const std::streamoff fileSize = file.tellg();
+    if (fileSize < 128)
+    {
+        return false;
+    }
+
+    std::vector<uint8_t> data(static_cast<size_t>(fileSize));
+    file.seekg(0, std::ios::beg);
+    file.read(reinterpret_cast<char*>(data.data()), fileSize);
+    if (!file)
+    {
+        return false;
+    }
+
+    if (ReadLe32(data.data()) != MakeFourCC('D', 'D', 'S', ' ') || ReadLe32(data.data() + 4) != 124)
+    {
+        return false;
+    }
+
+    const UINT height = ReadLe32(data.data() + 12);
+    const UINT width = ReadLe32(data.data() + 16);
+    const uint8_t* pixelFormat = data.data() + 76;
+    if (width == 0 || height == 0 || ReadLe32(pixelFormat) != 32)
+    {
+        return false;
+    }
+
+    static constexpr uint32_t ddsFourCC = 0x4;
+    static constexpr uint32_t ddsRgb = 0x40;
+    static constexpr uint32_t ddsAlphaPixels = 0x1;
+
+    const uint32_t pixelFormatFlags = ReadLe32(pixelFormat + 4);
+    const uint32_t fourCC = ReadLe32(pixelFormat + 8);
+    const uint32_t rgbBitCount = ReadLe32(pixelFormat + 12);
+    const uint32_t rMask = ReadLe32(pixelFormat + 16);
+    const uint32_t gMask = ReadLe32(pixelFormat + 20);
+    const uint32_t bMask = ReadLe32(pixelFormat + 24);
+    const uint32_t aMask = ReadLe32(pixelFormat + 28);
+    const uint8_t* source = data.data() + 128;
+    const size_t sourceSize = data.size() - 128;
+
+    if (pixelFormatFlags & ddsFourCC)
+    {
+        DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+        UINT bytesPerBlock = 0;
+        switch (fourCC)
+        {
+            case MakeFourCC('D', 'X', 'T', '1'):
+                format = DXGI_FORMAT_BC1_UNORM;
+                bytesPerBlock = 8;
+                break;
+            case MakeFourCC('D', 'X', 'T', '3'):
+                format = DXGI_FORMAT_BC2_UNORM;
+                bytesPerBlock = 16;
+                break;
+            case MakeFourCC('D', 'X', 'T', '5'):
+                format = DXGI_FORMAT_BC3_UNORM;
+                bytesPerBlock = 16;
+                break;
+            default:
+                return false;
+        }
+
+        const UINT blockColumns = std::max<UINT>(1, (width + 3) / 4);
+        const UINT blockRows = std::max<UINT>(1, (height + 3) / 4);
+        const UINT sourceRowPitch = blockColumns * bytesPerBlock;
+        const size_t requiredSize = static_cast<size_t>(sourceRowPitch) * blockRows;
+        if (sourceSize < requiredSize)
+        {
+            return false;
+        }
+
+        return UploadTextureData(width, height, format, source, requiredSize, sourceRowPitch, blockRows, slotIndex);
+    }
+
+    if ((pixelFormatFlags & ddsRgb) == 0 ||
+        rMask != 0x00ff0000 ||
+        gMask != 0x0000ff00 ||
+        bMask != 0x000000ff ||
+        ((pixelFormatFlags & ddsAlphaPixels) && aMask != 0xff000000))
+    {
+        return false;
+    }
+
+    const UINT sourceBytesPerPixel = rgbBitCount / 8;
+    if (sourceBytesPerPixel != 3 && sourceBytesPerPixel != 4)
+    {
+        return false;
+    }
+
+    const UINT sourceRowPitch = width * sourceBytesPerPixel;
+    const size_t requiredSize = static_cast<size_t>(sourceRowPitch) * height;
+    if (sourceSize < requiredSize)
+    {
+        return false;
+    }
+
+    std::vector<uint8_t> pixels(static_cast<size_t>(width) * height * 4);
+    for (UINT y = 0; y < height; ++y)
+    {
+        const uint8_t* srcRow = source + static_cast<size_t>(y) * sourceRowPitch;
+        uint8_t* dstRow = pixels.data() + static_cast<size_t>(y) * width * 4;
+        for (UINT x = 0; x < width; ++x)
+        {
+            const uint8_t* src = srcRow + static_cast<size_t>(x) * sourceBytesPerPixel;
+            uint8_t* dst = dstRow + static_cast<size_t>(x) * 4;
+            dst[0] = src[2];
+            dst[1] = src[1];
+            dst[2] = src[0];
+            dst[3] = sourceBytesPerPixel == 4 ? src[3] : 255;
+        }
+    }
+
+    return UploadTextureRGBA(width, height, pixels, slotIndex);
+}
+
+bool D3D12Resources::UploadTextureRGBA(UINT width, UINT height, const std::vector<uint8_t>& pixels, UINT slotIndex)
+{
+    if (width == 0 || height == 0 || pixels.size() < static_cast<size_t>(width) * height * 4 || slotIndex >= c_maxTextureLayers)
+    {
+        return false;
+    }
+
+    return UploadTextureData(width, height, DXGI_FORMAT_R8G8B8A8_UNORM, pixels.data(), pixels.size(), width * 4, height, slotIndex);
+}
+
+bool D3D12Resources::UploadTextureData(UINT width,
+                                       UINT height,
+                                       DXGI_FORMAT format,
+                                       const uint8_t* pixels,
+                                       size_t pixelsSize,
+                                       UINT sourceRowPitch,
+                                       UINT sourceRowCount,
+                                       UINT slotIndex)
+{
+    if (width == 0 || height == 0 || !pixels || pixelsSize == 0 || sourceRowPitch == 0 || sourceRowCount == 0 || slotIndex >= c_maxTextureLayers)
+    {
+        return false;
+    }
+
+    TextureSlot& slot = m_textureSlots[slotIndex];
 
     D3D12_RESOURCE_DESC textureDesc{};
     textureDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
@@ -1613,7 +1955,7 @@ bool D3D12Resources::UploadTextureRGBA(UINT width, UINT height, const std::vecto
     textureDesc.Height = height;
     textureDesc.DepthOrArraySize = 1;
     textureDesc.MipLevels = 1;
-    textureDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    textureDesc.Format = format;
     textureDesc.SampleDesc.Count = 1;
 
     D3D12_HEAP_PROPERTIES defaultHeap{};
@@ -1623,7 +1965,7 @@ bool D3D12Resources::UploadTextureRGBA(UINT width, UINT height, const std::vecto
                                                        &textureDesc,
                                                        D3D12_RESOURCE_STATE_COPY_DEST,
                                                        nullptr,
-                                                       IID_PPV_ARGS(m_texture.ReleaseAndGetAddressOf())));
+                                                       IID_PPV_ARGS(slot.texture.ReleaseAndGetAddressOf())));
 
     UINT64 uploadSize = 0;
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT layout{};
@@ -1647,33 +1989,38 @@ bool D3D12Resources::UploadTextureRGBA(UINT width, UINT height, const std::vecto
                                                        &uploadDesc,
                                                        D3D12_RESOURCE_STATE_GENERIC_READ,
                                                        nullptr,
-                                                       IID_PPV_ARGS(m_textureUploadBuffer.ReleaseAndGetAddressOf())));
+                                                       IID_PPV_ARGS(slot.uploadBuffer.ReleaseAndGetAddressOf())));
 
     uint8_t* mapped = nullptr;
-    ThrowIfFailed(m_textureUploadBuffer->Map(0, nullptr, reinterpret_cast<void**>(&mapped)));
-    const UINT sourceRowPitch = width * 4;
-    for (UINT row = 0; row < height; ++row)
+    ThrowIfFailed(slot.uploadBuffer->Map(0, nullptr, reinterpret_cast<void**>(&mapped)));
+    if (pixelsSize < static_cast<size_t>(sourceRowPitch) * sourceRowCount)
     {
-        memcpy(mapped + layout.Offset + static_cast<size_t>(row) * layout.Footprint.RowPitch, pixels.data() + static_cast<size_t>(row) * sourceRowPitch, sourceRowPitch);
+        slot.uploadBuffer->Unmap(0, nullptr);
+        return false;
     }
-    m_textureUploadBuffer->Unmap(0, nullptr);
+    const size_t copyRowPitch = std::min<size_t>(sourceRowPitch, layout.Footprint.RowPitch);
+    for (UINT row = 0; row < sourceRowCount; ++row)
+    {
+        memcpy(mapped + layout.Offset + static_cast<size_t>(row) * layout.Footprint.RowPitch, pixels + static_cast<size_t>(row) * sourceRowPitch, copyRowPitch);
+    }
+    slot.uploadBuffer->Unmap(0, nullptr);
 
     ThrowIfFailed(m_commandAllocators[m_frameIndex]->Reset());
     ThrowIfFailed(m_commandList->Reset(m_commandAllocators[m_frameIndex].Get(), nullptr));
 
     D3D12_TEXTURE_COPY_LOCATION dst{};
-    dst.pResource = m_texture.Get();
+    dst.pResource = slot.texture.Get();
     dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
 
     D3D12_TEXTURE_COPY_LOCATION src{};
-    src.pResource = m_textureUploadBuffer.Get();
+    src.pResource = slot.uploadBuffer.Get();
     src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
     src.PlacedFootprint = layout;
     m_commandList->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
 
     D3D12_RESOURCE_BARRIER barrier{};
     barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    barrier.Transition.pResource = m_texture.Get();
+    barrier.Transition.pResource = slot.texture.Get();
     barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
     barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
     barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
@@ -1689,7 +2036,9 @@ bool D3D12Resources::UploadTextureRGBA(UINT width, UINT height, const std::vecto
     srvDesc.Format = textureDesc.Format;
     srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
     srvDesc.Texture2D.MipLevels = 1;
-    m_d3dDevice->CreateShaderResourceView(m_texture.Get(), &srvDesc, m_srvHeap->GetCPUDescriptorHandleForHeapStart());
+    auto srvHandle = m_srvHeap->GetCPUDescriptorHandleForHeapStart();
+    srvHandle.ptr += static_cast<SIZE_T>(slotIndex) * m_srvDescriptorSize;
+    m_d3dDevice->CreateShaderResourceView(slot.texture.Get(), &srvDesc, srvHandle);
     return true;
 }
 
@@ -1707,8 +2056,10 @@ cbuffer Effects : register(b0)
     float solarize;
     float invert;
     float shaderAmount;
-    float pad0;
-    float pad1;
+    float blurAmount;
+    float texelX;
+    float texelY;
+    float blurEdgeDarken;
 };
 
 struct VSInput
@@ -1735,7 +2086,29 @@ PSInput VSMain(VSInput input)
 float4 PSMain(PSInput input) : SV_TARGET
 {
     float4 sampleColor = sourceTex.Sample(samp0, input.uv);
-    float3 color = max(sampleColor.rgb, 0.0f) * gamma;
+    float3 color = max(sampleColor.rgb, 0.0f);
+
+    if (blurAmount > 0.001f)
+    {
+        float2 texel = float2(texelX, texelY);
+        float3 blur =
+            color * 0.36f +
+            sourceTex.Sample(samp0, input.uv + float2(texel.x, 0.0f)).rgb * 0.12f +
+            sourceTex.Sample(samp0, input.uv - float2(texel.x, 0.0f)).rgb * 0.12f +
+            sourceTex.Sample(samp0, input.uv + float2(0.0f, texel.y)).rgb * 0.12f +
+            sourceTex.Sample(samp0, input.uv - float2(0.0f, texel.y)).rgb * 0.12f +
+            sourceTex.Sample(samp0, input.uv + texel).rgb * 0.04f +
+            sourceTex.Sample(samp0, input.uv - texel).rgb * 0.04f +
+            sourceTex.Sample(samp0, input.uv + float2(texel.x, -texel.y)).rgb * 0.04f +
+            sourceTex.Sample(samp0, input.uv + float2(-texel.x, texel.y)).rgb * 0.04f;
+        color = lerp(color, blur, saturate(blurAmount));
+
+        float edge = max(abs(input.uv.x * 2.0f - 1.0f), abs(input.uv.y * 2.0f - 1.0f));
+        float edgeFade = saturate((edge - 0.65f) / 0.35f);
+        color *= 1.0f - edgeFade * saturate(blurEdgeDarken) * saturate(blurAmount);
+    }
+
+    color *= gamma;
 
     if (brighten > 0.5f)
     {
@@ -1788,7 +2161,7 @@ float4 PSMain(PSInput input) : SV_TARGET
     rootParameters[0].DescriptorTable.pDescriptorRanges = &range;
     rootParameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
     rootParameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-    rootParameters[1].Constants.Num32BitValues = 8;
+    rootParameters[1].Constants.Num32BitValues = 12;
     rootParameters[1].Constants.ShaderRegister = 0;
     rootParameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
@@ -1916,6 +2289,28 @@ bool D3D12Resources::IsPostProcessEnabled() const
     return GetEnvironmentVariableW(L"FOO_VIS_MILK2_DX12_POSTPROCESS", value, static_cast<DWORD>(std::size(value))) > 0 && wcscmp(value, L"0") != 0;
 }
 
+bool D3D12Resources::IsPostProcessBlurEnabled() const
+{
+    wchar_t value[8]{};
+    return GetEnvironmentVariableW(L"FOO_VIS_MILK2_DX12_BLUR", value, static_cast<DWORD>(std::size(value))) > 0 && wcscmp(value, L"0") != 0;
+}
+
+float D3D12Resources::GetPostProcessBlurAmount() const
+{
+    wchar_t value[16]{};
+    if (GetEnvironmentVariableW(L"FOO_VIS_MILK2_DX12_BLUR_AMOUNT", value, static_cast<DWORD>(std::size(value))) > 0)
+    {
+        wchar_t* end = nullptr;
+        const float parsed = wcstof(value, &end);
+        if (end && *end == 0 && parsed >= 0.0f && parsed <= 1.0f)
+        {
+            return parsed;
+        }
+    }
+
+    return 0.18f;
+}
+
 bool D3D12Resources::IsTextureCyclingEnabled() const
 {
     wchar_t value[8]{};
@@ -1940,7 +2335,7 @@ DWORD D3D12Resources::GetTextureCycleIntervalMs() const
 
 void D3D12Resources::MaybeCycleTexture()
 {
-    if (!IsTextureCyclingEnabled() || m_textureFiles.empty())
+    if (m_presetTextureOverride || !IsTextureCyclingEnabled() || m_textureFiles.empty())
     {
         return;
     }
@@ -1957,7 +2352,7 @@ void D3D12Resources::MaybeCycleTexture()
     {
         const std::wstring textureFile = m_textureFiles[m_textureCycleIndex % m_textureFiles.size()];
         ++m_textureCycleIndex;
-        if (LoadTextureFromFile(textureFile.c_str()))
+        if (SetTextureFile(textureFile.c_str()))
         {
             return;
         }
@@ -2109,12 +2504,25 @@ void D3D12Resources::DrawTextureQuad(float bass,
                                      float motionStretchY,
                                      float motionWarp)
 {
-    if (!m_texture || !m_srvHeap || !m_texturePipelineState || !m_textureRootSignature)
+    if (!m_srvHeap || !m_texturePipelineState || !m_textureRootSignature)
     {
         return;
     }
 
-    DrawTextureQuadFromSrv(m_srvHeap->GetGPUDescriptorHandleForHeapStart(), m_srvHeap.Get(), bass, mids, treble, decay, zoom, rot, 1.0f, 1.0f, 0.0f, false, false, motionCenterX, motionCenterY, motionDX, motionDY, motionStretchX, motionStretchY, motionWarp);
+    for (UINT layer = 0; layer < m_activeTextureLayerCount && layer < c_maxTextureLayers; ++layer)
+    {
+        if (!m_textureSlots[layer].texture)
+        {
+            continue;
+        }
+
+        auto srvHandle = m_srvHeap->GetGPUDescriptorHandleForHeapStart();
+        srvHandle.ptr += static_cast<SIZE_T>(layer) * m_srvDescriptorSize;
+        const float layerAlpha = layer == 0 ? 1.0f : std::clamp(0.42f / static_cast<float>(layer + 1), 0.10f, 0.42f);
+        const float layerZoom = 1.0f + static_cast<float>(layer) * 0.08f;
+        const float layerAngle = static_cast<float>(layer) * 0.11f;
+        DrawTextureQuadFromSrv(srvHandle, m_srvHeap.Get(), bass, mids, treble, decay, zoom, rot, layerAlpha, layerZoom, layerAngle, false, false, motionCenterX, motionCenterY, motionDX, motionDY, motionStretchX, motionStretchY, motionWarp);
+    }
 }
 
 void D3D12Resources::DrawTextureQuadFromSrv(D3D12_GPU_DESCRIPTOR_HANDLE srvHandle,
@@ -2138,7 +2546,7 @@ void D3D12Resources::DrawTextureQuadFromSrv(D3D12_GPU_DESCRIPTOR_HANDLE srvHandl
                                             float motionStretchY,
                                             float motionWarp)
 {
-    if (!descriptorHeap || !m_texturePipelineState || !m_textureRootSignature || !m_mappedTextureVertices)
+    if (!descriptorHeap || !m_textureAlphaPipelineState || !m_textureRootSignature || !m_mappedTextureVertices)
     {
         return;
     }
@@ -2201,7 +2609,7 @@ void D3D12Resources::DrawTextureQuadFromSrv(D3D12_GPU_DESCRIPTOR_HANDLE srvHandl
 
     ID3D12DescriptorHeap* heaps[] = {descriptorHeap};
     m_commandList->SetDescriptorHeaps(1, heaps);
-    m_commandList->SetPipelineState(m_texturePipelineState.Get());
+    m_commandList->SetPipelineState(m_textureAlphaPipelineState.Get());
     m_commandList->SetGraphicsRootSignature(m_textureRootSignature.Get());
     m_commandList->SetGraphicsRootDescriptorTable(0, srvHandle);
     m_commandList->IASetVertexBuffers(0, 1, &m_textureVertexBufferView);
@@ -2315,9 +2723,10 @@ void D3D12Resources::DrawTextureMeshFromSrv(D3D12_GPU_DESCRIPTOR_HANDLE srvHandl
                                             float bass,
                                             float mids,
                                             float treble,
-                                            float decay)
+                                            float decay,
+                                            float alphaScale)
 {
-    if (!descriptorHeap || !vertices || vertexCount < 3 || !m_texturePipelineState || !m_textureRootSignature || !m_mappedTextureVertices)
+    if (!descriptorHeap || !vertices || vertexCount < 3 || !m_textureAlphaPipelineState || !m_textureRootSignature || !m_mappedTextureVertices)
     {
         return;
     }
@@ -2332,7 +2741,7 @@ void D3D12Resources::DrawTextureMeshFromSrv(D3D12_GPU_DESCRIPTOR_HANDLE srvHandl
     m_textureVertexCursor += copiedVertexCount;
 
     const float energy = std::clamp((bass + mids + treble) / 6.0f, 0.0f, 1.0f);
-    const float alpha = std::clamp(0.32f + energy * 0.22f + (1.0f - std::clamp(decay, 0.70f, 1.0f)) * 0.55f, 0.08f, 0.85f);
+    const float alpha = std::clamp((0.32f + energy * 0.22f + (1.0f - std::clamp(decay, 0.70f, 1.0f)) * 0.55f) * alphaScale, 0.04f, 0.85f);
     const float tintR = std::clamp(0.62f + bass * 0.10f, 0.0f, 1.0f);
     const float tintG = std::clamp(0.62f + mids * 0.08f, 0.0f, 1.0f);
     const float tintB = std::clamp(0.62f + treble * 0.10f, 0.0f, 1.0f);
@@ -2353,7 +2762,7 @@ void D3D12Resources::DrawTextureMeshFromSrv(D3D12_GPU_DESCRIPTOR_HANDLE srvHandl
 
     ID3D12DescriptorHeap* heaps[] = {descriptorHeap};
     m_commandList->SetDescriptorHeaps(1, heaps);
-    m_commandList->SetPipelineState(m_texturePipelineState.Get());
+    m_commandList->SetPipelineState(m_textureAlphaPipelineState.Get());
     m_commandList->SetGraphicsRootSignature(m_textureRootSignature.Get());
     m_commandList->SetGraphicsRootDescriptorTable(0, srvHandle);
     m_commandList->IASetVertexBuffers(0, 1, &m_textureVertexBufferView);
@@ -2368,7 +2777,9 @@ void D3D12Resources::DrawPostProcessFromSrv(D3D12_GPU_DESCRIPTOR_HANDLE srvHandl
                                             bool darken,
                                             bool solarize,
                                             bool invert,
-                                            float shaderAmount)
+                                            float shaderAmount,
+                                            float blurAmount,
+                                            float blurEdgeDarken)
 {
     if (!descriptorHeap || !m_mappedTextureVertices || !m_postProcessPipelineState || !m_postProcessRootSignature)
     {
@@ -2390,13 +2801,19 @@ void D3D12Resources::DrawPostProcessFromSrv(D3D12_GPU_DESCRIPTOR_HANDLE srvHandl
     };
     memcpy(m_mappedTextureVertices + vertexStart, vertices, sizeof(vertices));
 
-    const float constants[8] = {
+    const float width = static_cast<float>(std::max<long>(m_outputSize.right - m_outputSize.left, 1));
+    const float height = static_cast<float>(std::max<long>(m_outputSize.bottom - m_outputSize.top, 1));
+    const float constants[12] = {
         std::clamp(gamma, 0.0f, 8.0f),
         brighten ? 1.0f : 0.0f,
         darken ? 1.0f : 0.0f,
         solarize ? 1.0f : 0.0f,
         invert ? 1.0f : 0.0f,
         std::clamp(shaderAmount, 0.0f, 1.0f),
+        std::clamp(blurAmount, 0.0f, 1.0f),
+        1.0f / width,
+        1.0f / height,
+        std::clamp(blurEdgeDarken, 0.0f, 1.0f),
         0.0f,
         0.0f,
     };
@@ -2517,16 +2934,23 @@ float4 PSMain(PSInput input) : SV_TARGET
     bufferDesc.SampleDesc.Count = 1;
     bufferDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
 
-    ThrowIfFailed(m_d3dDevice->CreateCommittedResource(&heapProps,
-                                                       D3D12_HEAP_FLAG_NONE,
-                                                       &bufferDesc,
-                                                       D3D12_RESOURCE_STATE_GENERIC_READ,
-                                                       nullptr,
-                                                       IID_PPV_ARGS(m_waveformVertexBuffer.ReleaseAndGetAddressOf())));
-    ThrowIfFailed(m_waveformVertexBuffer->Map(0, nullptr, reinterpret_cast<void**>(&m_mappedWaveformVertices)));
+    D3D12_RANGE readRange{0, 0};
+    for (UINT i = 0; i < m_backBufferCount; ++i)
+    {
+        ThrowIfFailed(m_d3dDevice->CreateCommittedResource(&heapProps,
+                                                           D3D12_HEAP_FLAG_NONE,
+                                                           &bufferDesc,
+                                                           D3D12_RESOURCE_STATE_GENERIC_READ,
+                                                           nullptr,
+                                                           IID_PPV_ARGS(m_waveformVertexBuffers[i].ReleaseAndGetAddressOf())));
+        ThrowIfFailed(m_waveformVertexBuffers[i]->Map(0, &readRange, reinterpret_cast<void**>(&m_mappedWaveformVertexBuffers[i])));
 
-    m_waveformVertexBufferView.BufferLocation = m_waveformVertexBuffer->GetGPUVirtualAddress();
-    m_waveformVertexBufferView.StrideInBytes = sizeof(WaveformVertex);
-    m_waveformVertexBufferView.SizeInBytes = sizeof(WaveformVertex) * c_maxWaveformVertices;
+        m_waveformVertexBufferViews[i].BufferLocation = m_waveformVertexBuffers[i]->GetGPUVirtualAddress();
+        m_waveformVertexBufferViews[i].StrideInBytes = sizeof(WaveformVertex);
+        m_waveformVertexBufferViews[i].SizeInBytes = sizeof(WaveformVertex) * c_maxWaveformVertices;
+    }
+
+    m_mappedWaveformVertices = m_mappedWaveformVertexBuffers[m_frameIndex];
+    m_waveformVertexBufferView = m_waveformVertexBufferViews[m_frameIndex];
 }
 } // namespace DX

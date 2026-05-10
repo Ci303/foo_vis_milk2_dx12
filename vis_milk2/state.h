@@ -248,6 +248,7 @@ class CState
     ~CState();
 
     void Initialize();
+    void EnsureEvalContexts();
     void Default(DWORD ApplyFlags = STATE_ALL);
     void Finish();
     void StartBlendFrom(CState* s_from, float fAnimTime, float fTimespan);

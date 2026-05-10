@@ -63,6 +63,7 @@ int CPluginShell::GetCanvasMarginX() { return 0; }
 int CPluginShell::GetCanvasMarginY() { return 0; }
 HWND CPluginShell::GetWinampWindow() const { return m_hWndWinamp; }
 void CPluginShell::SetWinampWindow(HWND window) { m_hWndWinamp = window; }
+void CPluginShell::SetScreenMode(eScrMode screenmode) { m_screenmode = screenmode; }
 HINSTANCE CPluginShell::GetInstance() const { return m_hInstance; }
 wchar_t* CPluginShell::GetPluginsDirPath() { return m_szPluginsDirPath; }
 wchar_t* CPluginShell::GetConfigIniFile() { return m_szConfigIniFile; }
@@ -198,7 +199,7 @@ int CPluginShell::AllocateDX11()
 
 void CPluginShell::CleanUpDX11(int final_cleanup)
 {
-    if (m_lpDX && m_lpDX->IsD3D12Mode())
+    if (!m_lpDX || m_lpDX->IsD3D12Mode())
         return;
 
     // Always unbind the textures before releasing textures,
@@ -236,6 +237,30 @@ void CPluginShell::OnWindowSwap(HWND window, int width, int height)
 {
     if (!m_lpDX->OnWindowSwap(window, width, height))
         return;
+}
+
+bool CPluginShell::RestartD3D12ForWindow(HWND window, int width, int height, eScrMode screenmode)
+{
+    if (!window)
+        return false;
+
+    m_screenmode = screenmode;
+
+    if (!m_lpDX || !m_lpDX->IsD3D12Mode())
+    {
+        OnWindowSwap(window, width, height);
+        return m_lpDX && m_lpDX->m_ready;
+    }
+
+    CleanUpDirectX();
+    SetWinampWindow(window);
+
+    if (!InitDirectX())
+        return false;
+
+    m_lpDX->m_client_width = std::max(width, 1);
+    m_lpDX->m_client_height = std::max(height, 1);
+    return m_lpDX->m_ready;
 }
 
 void CPluginShell::OnWindowMoved()
@@ -376,6 +401,8 @@ void CPluginShell::CleanUpDirectX()
 
 int CPluginShell::PluginPreInitialize(HWND hWinampWnd, HINSTANCE hWinampInstance)
 {
+    m_pluginInitialized = false;
+
     // PROTECTED CONFIG PANEL SETTINGS (also see 'private' settings, below)
     m_start_fullscreen = 0;
     m_max_fps_fs = 30;
@@ -586,17 +613,32 @@ int CPluginShell::PluginInitialize(int iWidth, int iHeight)
     if (!InitDirectX()) return FALSE;
     m_lpDX->m_client_width = iWidth;
     m_lpDX->m_client_height = iHeight;
-    if (!InitNonDX11()) return FALSE;
-    if (!AllocateDX11()) return FALSE;
+    if (!InitNonDX11())
+    {
+        CleanUpDirectX();
+        return FALSE;
+    }
+    if (!AllocateDX11())
+    {
+        CleanUpNonDX11();
+        CleanUpDirectX();
+        return FALSE;
+    }
 
+    m_pluginInitialized = true;
     return TRUE;
 }
 
 void CPluginShell::PluginQuit()
 {
+    if (!m_pluginInitialized && !m_lpDX)
+        return;
+
     CleanUpDX11(1);
-    CleanUpNonDX11();
+    if (m_pluginInitialized)
+        CleanUpNonDX11();
     CleanUpDirectX();
+    m_pluginInitialized = false;
 }
 
 wchar_t* BuildSettingName(const wchar_t* name, const int number)

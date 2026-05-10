@@ -86,6 +86,10 @@ class D3D12Resources
     bool WindowSwap(HWND window, int width, int height);
     void SetTextureDirectory(const wchar_t* textureDirectory);
     bool SetTextureFile(const wchar_t* textureFile);
+    bool SetTextureFiles(const wchar_t* const* textureFiles, size_t textureFileCount);
+    bool SetPresetTextureFiles(const wchar_t* const* textureFiles, size_t textureFileCount);
+    void ClearPresetTextureOverride();
+    void ResetVisualHistory();
     void Clear();
     void DrawWaveform(const float* left,
                       const float* right,
@@ -126,6 +130,8 @@ class D3D12Resources
                       bool postDarken = false,
                       bool postSolarize = false,
                       float postShaderAmount = 0.0f,
+                      float postBlurAmount = 0.0f,
+                      float postBlurEdgeDarken = 0.25f,
                       float outerBorderSize = 0.0f,
                       float outerBorderR = 0.0f,
                       float outerBorderG = 0.0f,
@@ -157,23 +163,38 @@ class D3D12Resources
 
     RECT GetOutputSize() const noexcept { return m_outputSize; }
     DXGI_FORMAT GetBackBufferFormat() const noexcept { return m_backBufferFormat; }
+    std::wstring GetTextureDirectory() const { return m_textureDirectory; }
+    bool HasPresetTextureOverride() const noexcept { return m_presetTextureOverride; }
+    std::vector<std::wstring> GetActiveTextureFiles() const;
 
   private:
     void CreateFactory();
     void GetHardwareAdapter(IDXGIAdapter1** adapter);
     void MoveToNextFrame();
-    void WaitForGpu();
+    bool WaitForGpu(DWORD timeoutMs = INFINITE);
     D3D12_CPU_DESCRIPTOR_HANDLE GetCurrentRenderTargetView() const noexcept;
     void CreateWaveformResources();
     void CreateTextureResources();
     void CreatePostProcessResources();
     void CreatePostProcessTexture();
-    bool LoadTextureFromFile(const wchar_t* textureFile);
-    bool LoadTextureFromWic(const wchar_t* textureFile);
-    bool LoadTextureFromTga(const wchar_t* textureFile);
-    bool UploadTextureRGBA(UINT width, UINT height, const std::vector<uint8_t>& pixels);
+    bool LoadTextureFromFile(const wchar_t* textureFile, UINT slotIndex);
+    bool LoadTextureFromWic(const wchar_t* textureFile, UINT slotIndex);
+    bool LoadTextureFromTga(const wchar_t* textureFile, UINT slotIndex);
+    bool LoadTextureFromDds(const wchar_t* textureFile, UINT slotIndex);
+    bool UploadTextureRGBA(UINT width, UINT height, const std::vector<uint8_t>& pixels, UINT slotIndex);
+    bool UploadTextureData(UINT width,
+                           UINT height,
+                           DXGI_FORMAT format,
+                           const uint8_t* pixels,
+                           size_t pixelsSize,
+                           UINT sourceRowPitch,
+                           UINT sourceRowCount,
+                           UINT slotIndex);
+    bool SetTextureFilesInternal(const wchar_t* const* textureFiles, size_t textureFileCount, bool presetTextureOverride);
     void RefreshTextureFileList();
     bool IsPostProcessEnabled() const;
+    bool IsPostProcessBlurEnabled() const;
+    float GetPostProcessBlurAmount() const;
     bool IsTextureCyclingEnabled() const;
     DWORD GetTextureCycleIntervalMs() const;
     void MaybeCycleTexture();
@@ -225,7 +246,8 @@ class D3D12Resources
                                 float bass,
                                 float mids,
                                 float treble,
-                                float decay);
+                                float decay,
+                                float alphaScale);
     void DrawPostProcessFromSrv(D3D12_GPU_DESCRIPTOR_HANDLE srvHandle,
                                 ID3D12DescriptorHeap* descriptorHeap,
                                 float gamma,
@@ -233,9 +255,12 @@ class D3D12Resources
                                 bool darken,
                                 bool solarize,
                                 bool invert,
-                                float shaderAmount);
+                                float shaderAmount,
+                                float blurAmount,
+                                float blurEdgeDarken);
 
     static constexpr UINT c_maxBackBufferCount = 3;
+    static constexpr UINT c_maxTextureLayers = 4;
     static constexpr UINT c_maxWaveformVertices = 65536;
     static constexpr UINT c_maxTextureVertices = 32768;
 
@@ -250,6 +275,13 @@ class D3D12Resources
         float position[2];
         float uv[2];
         float color[4];
+    };
+
+    struct TextureSlot
+    {
+        Microsoft::WRL::ComPtr<ID3D12Resource> texture;
+        Microsoft::WRL::ComPtr<ID3D12Resource> uploadBuffer;
+        std::wstring file;
     };
 
     HWND m_window = nullptr;
@@ -273,7 +305,9 @@ class D3D12Resources
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_waveformAdditivePipelineState;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_solidPipelineState;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_solidAdditivePipelineState;
-    Microsoft::WRL::ComPtr<ID3D12Resource> m_waveformVertexBuffer;
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_waveformVertexBuffers[c_maxBackBufferCount];
+    D3D12_VERTEX_BUFFER_VIEW m_waveformVertexBufferViews[c_maxBackBufferCount]{};
+    WaveformVertex* m_mappedWaveformVertexBuffers[c_maxBackBufferCount]{};
     D3D12_VERTEX_BUFFER_VIEW m_waveformVertexBufferView{};
     WaveformVertex* m_mappedWaveformVertices = nullptr;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_srvHeap;
@@ -281,9 +315,12 @@ class D3D12Resources
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_texturePipelineState;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_textureAlphaPipelineState;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_textureAdditivePipelineState;
-    Microsoft::WRL::ComPtr<ID3D12Resource> m_textureVertexBuffer;
-    Microsoft::WRL::ComPtr<ID3D12Resource> m_texture;
-    Microsoft::WRL::ComPtr<ID3D12Resource> m_textureUploadBuffer;
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_textureVertexBuffers[c_maxBackBufferCount];
+    TextureSlot m_textureSlots[c_maxTextureLayers];
+    UINT m_activeTextureLayerCount = 0;
+    UINT m_srvDescriptorSize = 0;
+    D3D12_VERTEX_BUFFER_VIEW m_textureVertexBufferViews[c_maxBackBufferCount]{};
+    TextureVertex* m_mappedTextureVertexBuffers[c_maxBackBufferCount]{};
     D3D12_VERTEX_BUFFER_VIEW m_textureVertexBufferView{};
     TextureVertex* m_mappedTextureVertices = nullptr;
     UINT m_textureVertexCursor = 0;
@@ -301,6 +338,7 @@ class D3D12Resources
     std::vector<std::wstring> m_textureFiles;
     size_t m_textureCycleIndex = 0;
     ULONGLONG m_lastTextureCycleTick = 0;
+    bool m_presetTextureOverride = false;
     Microsoft::WRL::ComPtr<ID3D12Fence> m_fence;
     UINT64 m_fenceValues[c_maxBackBufferCount]{};
     HANDLE m_fenceEvent = nullptr;

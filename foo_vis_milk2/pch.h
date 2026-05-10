@@ -44,6 +44,7 @@
 #include <wrl/client.h>
 
 #include <array>
+#include <atomic>
 #include <filesystem>
 #include <map>
 #include <vector>
@@ -110,6 +111,8 @@
 
 #define WM_MILK2 (WM_USER + 0)
 #define WM_CONFIG_CHANGE (WM_USER + 1)
+#define WM_MILK2_RENDER (WM_USER + 2)
+#define WM_MILK2_RESTORE_WINDOWED (WM_USER + 3)
 
 #ifdef _DEBUG
 #define MILK2_CONSOLE_LOG(...) FB2K_console_print(core_api::get_my_file_name(), ": ", __VA_ARGS__);
