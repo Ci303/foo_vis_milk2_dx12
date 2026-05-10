@@ -132,6 +132,16 @@ bool DXContext::RecreateD3D12ResourcesForWindow(HWND window, int width, int heig
     else if (!textureDirectory.empty())
     {
         replacement->SetTextureDirectory(textureDirectory.c_str());
+        if (!textureFiles.empty())
+        {
+            std::vector<const wchar_t*> textureFilePtrs;
+            textureFilePtrs.reserve(textureFiles.size());
+            for (const auto& textureFile : textureFiles)
+            {
+                textureFilePtrs.push_back(textureFile.c_str());
+            }
+            replacement->SetTextureFiles(textureFilePtrs.data(), textureFilePtrs.size());
+        }
     }
 
     auto retired = std::move(m_d3d12Resources);
@@ -238,16 +248,90 @@ void DXContext::ClearPresetTextureOverride()
     }
 }
 
-void DXContext::SetD3D12TextOverlay(const wchar_t* topLeft, const wchar_t* topRight, const wchar_t* bottomLeft)
+bool DXContext::SetD3D12PresetCompositeShader(const void* bytecode, size_t bytecodeSize)
+{
+    return m_useD3D12 && m_d3d12Resources && m_d3d12Resources->SetPresetCompositeShader(bytecode, bytecodeSize);
+}
+
+void DXContext::ClearD3D12PresetCompositeShader()
 {
     if (m_useD3D12 && m_d3d12Resources)
     {
-        m_d3d12Resources->SetTextOverlay(topLeft, topRight, bottomLeft);
+        m_d3d12Resources->ClearPresetCompositeShader();
+    }
+}
+
+void DXContext::SetD3D12PresetShaderRuntimeConstants(float time,
+                                                     float fps,
+                                                     float frame,
+                                                     float progress,
+                                                     float bass,
+                                                     float mids,
+                                                     float treble,
+                                                     float bassAtt,
+                                                     float midsAtt,
+                                                     float trebleAtt,
+                                                     const float* qValues,
+                                                     const float* randFrame,
+                                                     const float* randPreset,
+                                                     const float* blurMin,
+                                                     const float* blurMax,
+                                                     const float* rotMatrices)
+{
+    if (m_useD3D12 && m_d3d12Resources)
+    {
+        m_d3d12Resources->SetPresetShaderRuntimeConstants(time,
+                                                          fps,
+                                                          frame,
+                                                          progress,
+                                                          bass,
+                                                          mids,
+                                                          treble,
+                                                          bassAtt,
+                                                          midsAtt,
+                                                          trebleAtt,
+                                                          qValues,
+                                                          randFrame,
+                                                          randPreset,
+                                                          blurMin,
+                                                          blurMax,
+                                                          rotMatrices);
+    }
+}
+
+bool DXContext::CaptureD3D12Frame(std::vector<uint8_t>* pixels, UINT* width, UINT* height)
+{
+    return m_useD3D12 && m_d3d12Resources && m_d3d12Resources->CaptureCurrentFrame(pixels, width, height);
+}
+
+bool DXContext::SetD3D12ResumeFeedback(UINT width, UINT height, const std::vector<uint8_t>& pixels)
+{
+    return m_useD3D12 && m_d3d12Resources && m_d3d12Resources->SetResumeFeedbackFromFrame(width, height, pixels);
+}
+
+void DXContext::SetD3D12TextOverlay(const wchar_t* topLeft,
+                                    const wchar_t* topRight,
+                                    const wchar_t* bottomLeft,
+                                    const wchar_t* debugLine,
+                                    const wchar_t* centerText,
+                                    float centerX,
+                                    float centerY,
+                                    float centerScale,
+                                    float centerR,
+                                    float centerG,
+                                    float centerB,
+                                    float centerA)
+{
+    if (m_useD3D12 && m_d3d12Resources)
+    {
+        m_d3d12Resources->SetTextOverlay(topLeft, topRight, bottomLeft, debugLine, centerText, centerX, centerY, centerScale, centerR, centerG, centerB, centerA);
     }
 }
 
 void DXContext::DrawWaveform(const float* left,
                              const float* right,
+                             const float* spectrumLeft,
+                             const float* spectrumRight,
                              size_t sampleCount,
                              float bass,
                              float mids,
@@ -278,6 +362,8 @@ void DXContext::DrawWaveform(const float* left,
                              bool waveBrighten,
                              int waveMode,
                              float waveParam,
+                             float waveSmoothing,
+                             float waveAlphaVolumeScale,
                              bool darkenCenter,
                              float postGamma,
                              bool postInvert,
@@ -285,6 +371,7 @@ void DXContext::DrawWaveform(const float* left,
                              bool postDarken,
                              bool postSolarize,
                              float postShaderAmount,
+                             const float* postHueShaderColors,
                              float postBlurAmount,
                              float postBlurEdgeDarken,
                              float outerBorderSize,
@@ -313,7 +400,9 @@ void DXContext::DrawWaveform(const float* left,
                              const DX::CustomWaveDrawCommand* customWaveDraws,
                              size_t customWaveDrawCount,
                              const DX::TextureWarpVertex* textureWarpVertices,
-                             size_t textureWarpVertexCount)
+                             size_t textureWarpVertexCount,
+                             int textureWarpGridX,
+                             int textureWarpGridY)
 {
     if (m_useD3D12)
     {
@@ -333,7 +422,7 @@ void DXContext::DrawWaveform(const float* left,
             m_d3d12ResizePending = false;
         }
 
-        m_d3d12Resources->DrawWaveform(left, right, sampleCount, bass, mids, treble, waveR, waveG, waveB, waveA, waveScale, waveX, waveY, decay, zoom, rot, motionCenterX, motionCenterY, motionDX, motionDY, motionStretchX, motionStretchY, motionWarp, echoAlpha, echoZoom, echoOrientation, waveUseDots, waveThick, waveAdditive, waveBrighten, waveMode, waveParam, darkenCenter, postGamma, postInvert, postBrighten, postDarken, postSolarize, postShaderAmount, postBlurAmount, postBlurEdgeDarken, outerBorderSize, outerBorderR, outerBorderG, outerBorderB, outerBorderA, innerBorderSize, innerBorderR, innerBorderG, innerBorderB, innerBorderA, motionVectorX, motionVectorY, motionVectorDX, motionVectorDY, motionVectorLength, motionVectorR, motionVectorG, motionVectorB, motionVectorA, customShapes, customShapeCount, customWaveVertices, customWaveVertexCount, customWaveDraws, customWaveDrawCount, textureWarpVertices, textureWarpVertexCount);
+        m_d3d12Resources->DrawWaveform(left, right, spectrumLeft, spectrumRight, sampleCount, bass, mids, treble, waveR, waveG, waveB, waveA, waveScale, waveX, waveY, decay, zoom, rot, motionCenterX, motionCenterY, motionDX, motionDY, motionStretchX, motionStretchY, motionWarp, echoAlpha, echoZoom, echoOrientation, waveUseDots, waveThick, waveAdditive, waveBrighten, waveMode, waveParam, waveSmoothing, waveAlphaVolumeScale, darkenCenter, postGamma, postInvert, postBrighten, postDarken, postSolarize, postShaderAmount, postHueShaderColors, postBlurAmount, postBlurEdgeDarken, outerBorderSize, outerBorderR, outerBorderG, outerBorderB, outerBorderA, innerBorderSize, innerBorderR, innerBorderG, innerBorderB, innerBorderA, motionVectorX, motionVectorY, motionVectorDX, motionVectorDY, motionVectorLength, motionVectorR, motionVectorG, motionVectorB, motionVectorA, customShapes, customShapeCount, customWaveVertices, customWaveVertexCount, customWaveDraws, customWaveDrawCount, textureWarpVertices, textureWarpVertexCount, textureWarpGridX, textureWarpGridY);
     }
 }
 
@@ -469,7 +558,6 @@ BOOL DXContext::OnWindowSwap(HWND window, int width, int height)
                 m_ready = FALSE;
                 return FALSE;
             }
-            m_d3d12Resources->ResetVisualHistory();
         }
         catch (...)
         {

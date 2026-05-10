@@ -32,6 +32,7 @@
 #define __NULLSOFT_DX_PLUGIN_H__
 
 #include <list>
+#include <map>
 #include <vector>
 #include "md_defines.h"
 #include "pluginshell.h"
@@ -554,6 +555,14 @@ class CPlugin : public CPluginShell
     char m_szBlurVS[32768];
     char m_szBlurPSX[32768];
     char m_szBlurPSY[32768];
+    std::set<std::string> m_d3d12PresetShaderCompileOk;
+    std::set<std::string> m_d3d12PresetShaderCompileFailed;
+    std::map<std::string, std::vector<uint8_t>> m_d3d12PresetShaderBytecodeCache;
+    std::wstring m_d3d12PresetShaderStatus;
+    std::string m_d3d12PresetCompositeShaderKey;
+    std::vector<uint8_t> m_d3d12ResumeFramePixels;
+    UINT m_d3d12ResumeFrameWidth = 0;
+    UINT m_d3d12ResumeFrameHeight = 0;
     //const char* GetDefaultWarpShadersText() const { return m_szDefaultWarpShaderText; }
     //const char* GetDefaultCompShadersText() const { return m_szDefaultCompShaderText; }
     void GenWarpPShaderText(char* szShaderText, float decay, bool bWrap) const;
@@ -578,6 +587,8 @@ class CPlugin : public CPluginShell
     void LoadRandomPreset(float fBlendTime);
     void LoadPreset(const wchar_t* szPresetFilename, float fBlendTime);
     void LoadPresetTick();
+    void CaptureD3D12VisualState();
+    void RestoreD3D12VisualState();
     void ResumeD3D12AfterWindowSwap();
     void SetPresetListPosition(std::wstring search);
     void FindValidPresetDir();
@@ -619,6 +630,10 @@ class CPlugin : public CPluginShell
     void DrawMotionVectors();
 
     bool LoadShaders(PShaderSet* sh, CState* pState, bool bTick);
+    bool CompileD3D12PresetShaderProbe(const char* shaderText, int shaderType, std::string* errors);
+    bool BuildD3D12PresetShaderBytecode(const char* shaderText, int shaderType, std::vector<uint8_t>* bytecode, std::string* errors);
+    void ProbeD3D12PresetShaders(CState* pState);
+    void UpdateD3D12PresetCompositeShader(CState* pState);
     void UvToMathSpace(float u, float v, float* rad, float* ang);
     void ApplyShaderParams(CShaderParams* p, CConstantTable* pCT, CState* pState);
     void RestoreShaderParams();

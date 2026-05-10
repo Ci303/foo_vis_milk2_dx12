@@ -1373,7 +1373,7 @@ void CPlugin::GetSafeBlurMinMax(CState* pState, float* blur_min, float* blur_max
     {
         float avg = (blur_min[0] + blur_max[0]) * 0.5f;
         blur_min[0] = avg - fMinDist * 0.5f;
-        blur_max[0] = avg - fMinDist * 0.5f;
+        blur_max[0] = avg + fMinDist * 0.5f;
     }
     blur_max[1] = std::min(blur_max[0], blur_max[1]);
     blur_min[1] = std::max(blur_min[0], blur_min[1]);
@@ -1381,7 +1381,7 @@ void CPlugin::GetSafeBlurMinMax(CState* pState, float* blur_min, float* blur_max
     {
         float avg = (blur_min[1] + blur_max[1]) * 0.5f;
         blur_min[1] = avg - fMinDist * 0.5f;
-        blur_max[1] = avg - fMinDist * 0.5f;
+        blur_max[1] = avg + fMinDist * 0.5f;
     }
     blur_max[2] = std::min(blur_max[1], blur_max[2]);
     blur_min[2] = std::max(blur_min[1], blur_min[2]);
@@ -1389,7 +1389,7 @@ void CPlugin::GetSafeBlurMinMax(CState* pState, float* blur_min, float* blur_max
     {
         float avg = (blur_min[2] + blur_max[2]) * 0.5f;
         blur_min[2] = avg - fMinDist * 0.5f;
-        blur_max[2] = avg - fMinDist * 0.5f;
+        blur_max[2] = avg + fMinDist * 0.5f;
     }
 }
 

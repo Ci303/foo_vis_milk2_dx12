@@ -420,6 +420,8 @@ void milk2_ui_element::OnSize(UINT nType, CSize size)
             return;
 #endif
         g_plugin.OnWindowSizeChanged(width, height);
+        if (g_plugin.IsD3D12Active() && !s_fullscreen)
+            ::SetTimer(get_wnd(), WM_MILK2_REPAIR_WINDOWED_DX12, 180, nullptr);
 #ifdef TIMER_TP
         LeaveCriticalSection(&s_cs);
 #endif
@@ -447,6 +449,8 @@ void milk2_ui_element::OnExitSizeMove()
         const int width = std::max<int>(rc.right - rc.left, 128);
         const int height = std::max<int>(rc.bottom - rc.top, 128);
         g_plugin.OnWindowSizeChanged(width, height);
+        if (g_plugin.IsD3D12Active() && !s_fullscreen)
+            ::SetTimer(get_wnd(), WM_MILK2_REPAIR_WINDOWED_DX12, 180, nullptr);
 #ifdef TIMER_TP
         LeaveCriticalSection(&s_cs);
 #endif
@@ -958,8 +962,12 @@ LRESULT milk2_ui_element::OnRepairWindowedD3D12(UINT uMsg, WPARAM wParam, LPARAM
     if (TryEnterCriticalSection(&s_cs) == 0)
         return 0;
 #endif
+    g_plugin.CaptureD3D12VisualState();
     if (g_plugin.RestartD3D12ForWindow(get_wnd(), width, height, WINDOWED))
+    {
+        g_plugin.RestoreD3D12VisualState();
         g_plugin.ResumeD3D12AfterWindowSwap();
+    }
 #ifdef TIMER_TP
     LeaveCriticalSection(&s_cs);
 #endif
@@ -1026,7 +1034,10 @@ bool milk2_ui_element::Initialize(HWND window, int width, int height)
         if (FALSE == g_plugin.PluginInitialize(width, height))
             return false;
         if (g_plugin.IsD3D12Active())
+        {
+            g_plugin.RestoreD3D12VisualState();
             g_plugin.ResumeD3D12AfterWindowSwap();
+        }
 
         HICON hIcon = ::LoadIcon(_AtlBaseModule.GetResourceInstance(), MAKEINTRESOURCE(IDI_MILK2_ICON));
         HWND parent = GetRealParent(get_wnd());
@@ -1056,6 +1067,7 @@ bool milk2_ui_element::Initialize(HWND window, int width, int height)
 #endif
         if (rebuildD3D12)
         {
+            g_plugin.CaptureD3D12VisualState();
             g_plugin.PluginQuit();
             s_milk2 = false;
             if (!initializeFreshPlugin())

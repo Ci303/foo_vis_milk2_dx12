@@ -1064,9 +1064,8 @@ static void CancelThread(int max_wait_time_ms)
 // created or initialized in `AllocateMilkDropNonDX11()`.
 void CPlugin::CleanUpMilkDropNonDX11()
 {
+    CancelThread(10000);
     DeleteCriticalSection(&g_cs);
-
-    CancelThread(0);
 
     m_menuPreset.Finish();
     m_menuWave.Finish();
@@ -2351,11 +2350,41 @@ static bool IsShaderIdentifierChar(char c)
     return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_';
 }
 
-static void AppendD3D12SamplerRoots(const char* shaderText, std::vector<std::wstring>& roots)
+static bool StripD3D12SamplerFilterPrefix(wchar_t* rootName)
+{
+    if (!rootName || wcslen(rootName) <= 3 || rootName[2] != L'_')
+        return false;
+
+    wchar_t filter[3]{rootName[0], rootName[1], L'\0'};
+    _wcsupr_s(filter);
+    if (wcscmp(filter, L"FW") && wcscmp(filter, L"FC") && wcscmp(filter, L"PW") && wcscmp(filter, L"PC") &&
+        wcscmp(filter, L"WF") && wcscmp(filter, L"CF") && wcscmp(filter, L"WP") && wcscmp(filter, L"CP"))
+    {
+        return false;
+    }
+
+    memmove(rootName, rootName + 3, (wcslen(rootName + 3) + 1) * sizeof(wchar_t));
+    return true;
+}
+
+static bool IsD3D12BuiltInSamplerRoot(const wchar_t* rootName)
+{
+    return !rootName ||
+           !_wcsicmp(rootName, L"main") ||
+           !_wcsicmp(rootName, L"fc_main") ||
+           !_wcsicmp(rootName, L"pc_main") ||
+           !_wcsicmp(rootName, L"fw_main") ||
+           !_wcsicmp(rootName, L"pw_main") ||
+           !_wcsnicmp(rootName, L"blur", 4) ||
+           !_wcsnicmp(rootName, L"noise", 5);
+}
+
+static void CollectD3D12DiskSamplerAliases(const char* shaderText, std::vector<std::pair<std::string, std::wstring>>& aliases)
 {
     if (!shaderText)
         return;
 
+    std::vector<std::wstring> assignedRoots;
     const char* cursor = shaderText;
     while ((cursor = strstr(cursor, "sampler_")) != nullptr)
     {
@@ -2372,32 +2401,58 @@ static void AppendD3D12SamplerRoots(const char* shaderText, std::vector<std::wst
 
         wchar_t rootName[MAX_PATH]{};
         wcscpy_s(rootName, MAX_PATH, AutoWide(name));
+        StripD3D12SamplerFilterPrefix(rootName);
 
-        if (wcslen(rootName) > 3 && rootName[2] == L'_')
-        {
-            wchar_t filter[3]{rootName[0], rootName[1], L'\0'};
-            _wcsupr_s(filter);
-            if (!wcscmp(filter, L"FW") || !wcscmp(filter, L"FC") || !wcscmp(filter, L"PW") || !wcscmp(filter, L"PC") ||
-                !wcscmp(filter, L"WF") || !wcscmp(filter, L"CF") || !wcscmp(filter, L"WP") || !wcscmp(filter, L"CP"))
-            {
-                memmove(rootName, rootName + 3, (wcslen(rootName + 3) + 1) * sizeof(wchar_t));
-            }
-        }
-
-        if (!_wcsicmp(rootName, L"main") || !_wcsnicmp(rootName, L"blur", 4))
+        if (IsD3D12BuiltInSamplerRoot(rootName))
             continue;
 
+        bool aliasAlreadyQueued = false;
+        for (const auto& alias : aliases)
+        {
+            if (!_stricmp(alias.first.c_str(), name))
+            {
+                aliasAlreadyQueued = true;
+                break;
+            }
+        }
+        if (aliasAlreadyQueued)
+            continue;
+
+        bool rootAlreadyAssigned = false;
+        for (const auto& existingRoot : assignedRoots)
+        {
+            if (!_wcsicmp(existingRoot.c_str(), rootName))
+            {
+                rootAlreadyAssigned = true;
+                break;
+            }
+        }
+        if (!rootAlreadyAssigned && assignedRoots.size() >= 4)
+            continue;
+        if (!rootAlreadyAssigned)
+            assignedRoots.emplace_back(rootName);
+
+        aliases.emplace_back(name, rootName);
+    }
+}
+
+static void AppendD3D12SamplerRoots(const char* shaderText, std::vector<std::wstring>& roots)
+{
+    std::vector<std::pair<std::string, std::wstring>> aliases;
+    CollectD3D12DiskSamplerAliases(shaderText, aliases);
+    for (const auto& alias : aliases)
+    {
         bool alreadyQueued = false;
         for (const auto& existingRoot : roots)
         {
-            if (!_wcsicmp(existingRoot.c_str(), rootName))
+            if (!_wcsicmp(existingRoot.c_str(), alias.second.c_str()))
             {
                 alreadyQueued = true;
                 break;
             }
         }
         if (!alreadyQueued)
-            roots.emplace_back(rootName);
+            roots.emplace_back(alias.second);
     }
 }
 
@@ -2473,6 +2528,52 @@ static bool AppendD3D12SamplerTextureFile(const wchar_t* milkdropPath, const wch
     }
 
     return false;
+}
+
+static std::string BuildD3D12DiskSamplerAliasBlock(const char* shaderText)
+{
+    std::vector<std::pair<std::string, std::wstring>> aliases;
+    CollectD3D12DiskSamplerAliases(shaderText, aliases);
+    if (aliases.empty())
+        return {};
+
+    std::vector<std::wstring> roots;
+    std::string block = "\n// DX12 disk sampler aliases.\n";
+    for (const auto& alias : aliases)
+    {
+        size_t layer = 0;
+        bool foundLayer = false;
+        for (; layer < roots.size(); ++layer)
+        {
+            if (!_wcsicmp(roots[layer].c_str(), alias.second.c_str()))
+            {
+                foundLayer = true;
+                break;
+            }
+        }
+        if (!foundLayer)
+        {
+            if (roots.size() >= 4)
+                continue;
+            roots.emplace_back(alias.second);
+            layer = roots.size() - 1;
+            char declaration[256]{};
+            sprintf_s(declaration,
+                      "texture d3d12_layer%zu : register(t%zu);\n"
+                      "sampler2D sampler_d3d12_layer%zu = sampler_state { Texture = <d3d12_layer%zu>; };\n",
+                      layer,
+                      layer + 1,
+                      layer,
+                      layer);
+            block += declaration;
+        }
+
+        char defineLine[256]{};
+        sprintf_s(defineLine, "#define sampler_%s sampler_d3d12_layer%zu\n", alias.first.c_str(), layer);
+        block += defineLine;
+    }
+    block += "\n";
+    return block;
 }
 
 bool CPlugin::SelectD3D12PresetTexture()
@@ -3041,6 +3142,299 @@ bool CPlugin::LoadShaders(PShaderSet* sh, CState* pState, bool bTick)
     }
 
     return true;
+}
+
+bool CPlugin::CompileD3D12PresetShaderProbe(const char* szOrigShaderText, int shaderType, std::string* errors)
+{
+    if (!szOrigShaderText || !*szOrigShaderText)
+        return true;
+
+    const std::string cacheKey = std::to_string(shaderType) + ":" + szOrigShaderText;
+    if (m_d3d12PresetShaderCompileOk.find(cacheKey) != m_d3d12PresetShaderCompileOk.end())
+        return true;
+    if (m_d3d12PresetShaderCompileFailed.find(cacheKey) != m_d3d12PresetShaderCompileFailed.end())
+        return false;
+
+    std::vector<uint8_t> unusedBytecode;
+    if (BuildD3D12PresetShaderBytecode(szOrigShaderText, shaderType, &unusedBytecode, errors))
+    {
+        m_d3d12PresetShaderCompileOk.insert(cacheKey);
+        return true;
+    }
+
+    m_d3d12PresetShaderCompileFailed.insert(cacheKey);
+    return false;
+}
+
+bool CPlugin::BuildD3D12PresetShaderBytecode(const char* szOrigShaderText, int shaderType, std::vector<uint8_t>* bytecode, std::string* errors)
+{
+    if (!szOrigShaderText || !*szOrigShaderText)
+        return false;
+
+    const std::string cacheKey = std::to_string(shaderType) + ":" + szOrigShaderText;
+    if (bytecode)
+    {
+        const auto cached = m_d3d12PresetShaderBytecodeCache.find(cacheKey);
+        if (cached != m_d3d12PresetShaderBytecodeCache.end())
+        {
+            *bytecode = cached->second;
+            return true;
+        }
+    }
+
+    // clang-format off
+    const char szWarpDefines[] = "#define rad _rad_ang.x\n"
+                                 "#define ang _rad_ang.y\n"
+                                 "#define uv _uv.xy\n"
+                                 "#define uv_orig _uv.zw\n";
+    const char szCompDefines[] = "#define rad _rad_ang.x\n"
+                                 "#define ang _rad_ang.y\n"
+                                 "#define uv _uv.xy\n"
+                                 "#define uv_orig _uv.xy\n"
+                                 "#define hue_shader _vDiffuse.xyz\n";
+    const char szWarpParams[]  = "float4 _vDiffuse : COLOR, float4 _uv : TEXCOORD0, float2 _rad_ang : TEXCOORD1, out float4 _return_value : COLOR0";
+    const char szCompParams[]  = "float4 _vDiffuse : COLOR, float2 _uv : TEXCOORD0, float2 _rad_ang : TEXCOORD1, out float4 _return_value : COLOR0";
+    const char szFirstLine[]   = "    float3 ret = 0;";
+    const char szLastLine[]    = "    _return_value = float4(ret.xyz, _vDiffuse.w);";
+    // clang-format on
+
+    char szShaderText[128000]{};
+    char temp[128000]{};
+    size_t writePos = 0;
+
+    strcpy_s(&szShaderText[writePos], ARRAYSIZE(szShaderText), m_szShaderIncludeText);
+    writePos += m_nShaderIncludeTextLen;
+
+    static constexpr const char szD3D12SamplerAliases[] =
+        "#define sampler_fc_main sampler_main\n"
+        "#define sampler_pc_main sampler_main\n"
+        "#define sampler_fw_main sampler_main\n"
+        "#define sampler_pw_main sampler_main\n"
+        "#define sampler_FC_main sampler_main\n"
+        "#define sampler_PC_main sampler_main\n"
+        "#define sampler_FW_main sampler_main\n"
+        "#define sampler_PW_main sampler_main\n"
+        "#define sampler_blur1 sampler_main\n"
+        "#define sampler_blur2 sampler_main\n"
+        "#define sampler_blur3 sampler_main\n"
+        "#define sampler_noise_lq sampler_main\n"
+        "#define sampler_noise_lq_lite sampler_main\n"
+        "#define sampler_noise_mq sampler_main\n"
+        "#define sampler_noise_hq sampler_main\n";
+    strcpy_s(&szShaderText[writePos], ARRAYSIZE(szShaderText) - writePos, szD3D12SamplerAliases);
+    writePos += strlen(szD3D12SamplerAliases);
+
+    const char* defines = shaderType == SHADER_WARP ? szWarpDefines : szCompDefines;
+    strcpy_s(&szShaderText[writePos], ARRAYSIZE(szShaderText) - writePos, defines);
+    writePos += strlen(defines);
+
+    const size_t shaderStartPos = writePos;
+    const char* source = szOrigShaderText;
+    char* dest = &szShaderText[writePos];
+    while (*source && writePos + 3 < ARRAYSIZE(szShaderText))
+    {
+        if (*source == LINEFEED_CONTROL_CHAR)
+        {
+            *dest++ = '\r';
+            *dest++ = '\n';
+            writePos += 2;
+        }
+        else
+        {
+            *dest++ = *source;
+            ++writePos;
+        }
+        ++source;
+    }
+    *dest = '\0';
+
+    StripComments(&szShaderText[shaderStartPos]);
+
+    const std::string diskSamplerAliases = BuildD3D12DiskSamplerAliasBlock(szOrigShaderText);
+    if (!diskSamplerAliases.empty())
+    {
+        char* shaderBody = strstr(&szShaderText[shaderStartPos], "shader_body");
+        if (shaderBody)
+        {
+            const size_t aliasLength = diskSamplerAliases.size();
+            const size_t tailLength = strlen(shaderBody);
+            const size_t bodyOffset = shaderBody - &szShaderText[0];
+            if (bodyOffset + aliasLength + tailLength + 1 < ARRAYSIZE(szShaderText))
+            {
+                memmove(shaderBody + aliasLength, shaderBody, tailLength + 1);
+                memcpy(shaderBody, diskSamplerAliases.data(), aliasLength);
+            }
+        }
+    }
+
+    char* p = &szShaderText[shaderStartPos];
+    while (*p && strncmp(p, "shader_body", 11))
+        ++p;
+    if (!*p)
+    {
+        if (errors)
+            *errors = "shader_body entry point was not found";
+        return false;
+    }
+
+    for (int i = 0; i < 11; ++i)
+        *p++ = ' ';
+
+    strcpy_s(temp, p);
+    const char* params = shaderType == SHADER_WARP ? szWarpParams : szCompParams;
+    size_t remains = ARRAYSIZE(szShaderText) - (p - &szShaderText[0]);
+    int length = sprintf_s(p, remains, "void PS( %s )\n", params);
+    p += length;
+    strcpy_s(p, remains - length, temp);
+
+    p = strchr(p, '{');
+    if (!p)
+    {
+        if (errors)
+            *errors = "shader_body opening brace was not found";
+        return false;
+    }
+    ++p;
+
+    strcpy_s(temp, p);
+    remains = ARRAYSIZE(szShaderText) - (p - &szShaderText[0]);
+    length = sprintf_s(p, remains, "%s\n", szFirstLine);
+    p += length;
+    strcpy_s(p, remains - length, temp);
+
+    p = strrchr(p, '}');
+    if (!p)
+    {
+        if (errors)
+            *errors = "shader_body closing brace was not found";
+        return false;
+    }
+    remains = ARRAYSIZE(szShaderText) - (p - &szShaderText[0]);
+    sprintf_s(p, remains, " %s\n}\n", szLastLine);
+
+    Microsoft::WRL::ComPtr<ID3DBlob> shaderByteCode;
+    Microsoft::WRL::ComPtr<ID3DBlob> compileErrors;
+    const UINT flags = D3DCOMPILE_ENABLE_BACKWARDS_COMPATIBILITY;
+    const HRESULT hr = D3DCompile(szShaderText,
+                                  strlen(szShaderText),
+                                  nullptr,
+                                  nullptr,
+                                  nullptr,
+                                  "PS",
+                                  "ps_5_0",
+                                  flags,
+                                  0,
+                                  shaderByteCode.GetAddressOf(),
+                                  compileErrors.GetAddressOf());
+    if (FAILED(hr))
+    {
+        if (errors)
+        {
+            if (compileErrors && compileErrors->GetBufferPointer())
+                errors->assign(static_cast<const char*>(compileErrors->GetBufferPointer()), compileErrors->GetBufferSize());
+            else
+                *errors = "D3DCompile failed without compiler output";
+        }
+        return false;
+    }
+
+    if (bytecode)
+    {
+        const auto* shaderStart = static_cast<const uint8_t*>(shaderByteCode->GetBufferPointer());
+        bytecode->assign(shaderStart, shaderStart + shaderByteCode->GetBufferSize());
+        m_d3d12PresetShaderBytecodeCache[cacheKey] = *bytecode;
+    }
+    return true;
+}
+
+void CPlugin::ProbeD3D12PresetShaders(CState* pState)
+{
+    if (!IsD3D12Mode() || !pState)
+        return;
+
+    int shaderCount = 0;
+    int okCount = 0;
+    std::string errors;
+
+    if (pState->m_nWarpPSVersion > 0 && pState->m_szWarpShadersText[0])
+    {
+        ++shaderCount;
+        if (CompileD3D12PresetShaderProbe(pState->m_szWarpShadersText, SHADER_WARP, &errors))
+            ++okCount;
+    }
+    if (pState->m_nCompPSVersion > 0 && pState->m_szCompShadersText[0])
+    {
+        ++shaderCount;
+        if (CompileD3D12PresetShaderProbe(pState->m_szCompShadersText, SHADER_COMP, &errors))
+            ++okCount;
+    }
+
+    if (shaderCount == 0)
+    {
+        m_d3d12PresetShaderStatus.clear();
+        UpdateD3D12PresetCompositeShader(pState);
+        return;
+    }
+
+    wchar_t status[256]{};
+    swprintf_s(status,
+               L"DX12 PROBE: %d/%d OK CACHE %zu/%zu",
+               okCount,
+               shaderCount,
+               m_d3d12PresetShaderCompileOk.size(),
+               m_d3d12PresetShaderCompileFailed.size());
+    m_d3d12PresetShaderStatus = status;
+    UpdateD3D12PresetCompositeShader(pState);
+
+    if (okCount != shaderCount && !errors.empty())
+    {
+        char firstLine[512]{};
+        size_t lineLength = errors.find_first_of("\r\n");
+        if (lineLength == std::string::npos)
+            lineLength = errors.size();
+        lineLength = std::min(lineLength, std::size(firstLine) - 1);
+        memcpy(firstLine, errors.data(), lineLength);
+        OutputDebugStringA("foo_vis_milk2 DX12 shader probe failed: ");
+        OutputDebugStringA(firstLine);
+        OutputDebugStringA("\n");
+    }
+}
+
+void CPlugin::UpdateD3D12PresetCompositeShader(CState* pState)
+{
+    wchar_t enabledValue[8]{};
+    const bool enableCompositeShader = GetEnvironmentVariableW(L"FOO_VIS_MILK2_DX12_COMP_SHADER",
+                                                               enabledValue,
+                                                               static_cast<DWORD>(std::size(enabledValue))) > 0 &&
+                                       wcscmp(enabledValue, L"0") != 0;
+    if (!enableCompositeShader || !IsD3D12Mode() || !m_lpDX || !pState || pState->m_nCompPSVersion <= 0 || !pState->m_szCompShadersText[0])
+    {
+        m_d3d12PresetCompositeShaderKey.clear();
+        if (m_lpDX)
+            m_lpDX->ClearD3D12PresetCompositeShader();
+        return;
+    }
+
+    const std::string cacheKey = std::string("comp:") + pState->m_szCompShadersText;
+    if (cacheKey == m_d3d12PresetCompositeShaderKey)
+        return;
+
+    std::vector<uint8_t> bytecode;
+    std::string errors;
+    if (!BuildD3D12PresetShaderBytecode(pState->m_szCompShadersText, SHADER_COMP, &bytecode, &errors) ||
+        !m_lpDX->SetD3D12PresetCompositeShader(bytecode.data(), bytecode.size()))
+    {
+        m_d3d12PresetCompositeShaderKey.clear();
+        m_lpDX->ClearD3D12PresetCompositeShader();
+        OutputDebugStringA("foo_vis_milk2 DX12 composite shader PSO unavailable; falling back to fixed postprocess\n");
+        return;
+    }
+
+    m_d3d12PresetCompositeShaderKey = cacheKey;
+    if (!m_d3d12PresetShaderStatus.empty())
+    {
+        m_d3d12PresetShaderStatus += L" COMP";
+    }
 }
 
 //----------------------------------------------------------------------
@@ -3624,11 +4018,30 @@ void CPlugin::MilkDropRenderFrame(int redraw)
                          (newPresetUsesWarpShader ? 2 : 0) |
                          (newPresetUsesCompShader ? 1 : 0);
 
+        const int dx12LiveWidth = std::max(1, GetWidth());
+        const int dx12LiveHeight = std::max(1, GetHeight());
+        m_fAspectX = (dx12LiveHeight > dx12LiveWidth) ? dx12LiveWidth / static_cast<float>(dx12LiveHeight) : 1.0f;
+        m_fAspectY = (dx12LiveWidth > dx12LiveHeight) ? dx12LiveHeight / static_cast<float>(dx12LiveWidth) : 1.0f;
+        m_fInvAspectX = 1.0f / m_fAspectX;
+        m_fInvAspectY = 1.0f / m_fAspectY;
+
         RunPerFrameEquations(code);
 
         const float bass = (m_sound.imm[0][0] + m_sound.imm[1][0]) * 0.5f;
         const float mids = (m_sound.imm[0][1] + m_sound.imm[1][1]) * 0.5f;
         const float treble = (m_sound.imm[0][2] + m_sound.imm[1][2]) * 0.5f;
+        float dx12WaveAlphaVolumeScale = 1.0f;
+        if (m_pState->m_bModWaveAlphaByVolume)
+        {
+            const float alphaStart = m_pState->m_fModWaveAlphaStart.eval(GetTime());
+            const float alphaEnd = m_pState->m_fModWaveAlphaEnd.eval(GetTime());
+            const float alphaDenom = alphaEnd - alphaStart;
+            if (fabsf(alphaDenom) > 0.0001f)
+            {
+                const float volume = (mdsound.imm_rel[0] + mdsound.imm_rel[1] + mdsound.imm_rel[2]) * 0.333f;
+                dx12WaveAlphaVolumeScale = (volume - alphaStart) / alphaDenom;
+            }
+        }
         auto clean = [](double value, float fallback) -> float {
             return _finite(value) ? static_cast<float>(value) : fallback;
         };
@@ -3646,10 +4059,10 @@ void CPlugin::MilkDropRenderFrame(int redraw)
                 vertex.y = std::clamp(-source.y, -2.0f, 2.0f);
                 vertex.u = clean(source.tu, 0.5f);
                 vertex.v = clean(source.tv, 0.5f);
-                vertex.r = 1.0f;
-                vertex.g = 1.0f;
-                vertex.b = 1.0f;
-                vertex.a = 1.0f;
+                vertex.r = std::clamp(clean(source.r, 1.0f), 0.0f, 1.0f);
+                vertex.g = std::clamp(clean(source.g, 1.0f), 0.0f, 1.0f);
+                vertex.b = std::clamp(clean(source.b, 1.0f), 0.0f, 1.0f);
+                vertex.a = std::clamp(clean(source.a, 1.0f), 0.0f, 1.0f);
                 textureWarpVertices.push_back(vertex);
             };
 
@@ -3673,7 +4086,7 @@ void CPlugin::MilkDropRenderFrame(int redraw)
         }
 
         std::vector<DX::CustomShapeDrawCommand> customShapes;
-        customShapes.reserve(MAX_CUSTOM_SHAPES * 4);
+        customShapes.reserve(MAX_CUSTOM_SHAPES * 64);
         const int shapeReps = m_pState->m_bBlending ? 2 : 1;
         for (int rep = 0; rep < shapeReps; ++rep)
         {
@@ -3685,7 +4098,7 @@ void CPlugin::MilkDropRenderFrame(int redraw)
                 if (!pState->m_shape[shapeIndex].enabled)
                     continue;
 
-                const int instances = std::clamp(pState->m_shape[shapeIndex].instances, 1, 64);
+                const int instances = std::clamp(pState->m_shape[shapeIndex].instances, 1, 256);
                 for (int instance = 0; instance < instances; ++instance)
                 {
                     LoadCustomShapePerFrameEvallibVars(pState, shapeIndex, instance);
@@ -3727,7 +4140,7 @@ void CPlugin::MilkDropRenderFrame(int redraw)
         customWaveVertices.reserve(MAX_CUSTOM_WAVES * 2048);
         customWaveDraws.reserve(MAX_CUSTOM_WAVES * 8);
 
-        auto appendCustomWaveDraw = [&](size_t start, size_t count, bool additive, bool triangleList) {
+        auto appendCustomWaveDraw = [&](size_t start, size_t count, bool additive, bool triangleList, D3D12_PRIMITIVE_TOPOLOGY topology) {
             if (count == 0)
                 return;
 
@@ -3736,6 +4149,7 @@ void CPlugin::MilkDropRenderFrame(int redraw)
             draw.vertexCount = count;
             draw.additive = additive;
             draw.triangleList = triangleList;
+            draw.topology = topology;
             customWaveDraws.push_back(draw);
         };
 
@@ -3882,27 +4296,35 @@ void CPlugin::MilkDropRenderFrame(int redraw)
                 if (wave.bUseDots)
                 {
                     const float pointSize = static_cast<float>((m_nTexSizeX >= 1024) ? 2 : 1) + (wave.bDrawThick ? 1.0f : 0.0f);
-                    const float dx = pointSize / static_cast<float>(std::max(1, m_nTexSizeX));
-                    const float dy = pointSize / static_cast<float>(std::max(1, m_nTexSizeY));
                     const size_t start = customWaveVertices.size();
-                    for (const auto& point : wavePoints)
+                    if (pointSize > 1.0f)
                     {
-                        DX::CustomWaveVertex v0 = point;
-                        DX::CustomWaveVertex v1 = point;
-                        DX::CustomWaveVertex v2 = point;
-                        DX::CustomWaveVertex v3 = point;
-                        v0.x -= dx; v0.y -= dy;
-                        v1.x += dx; v1.y -= dy;
-                        v2.x += dx; v2.y += dy;
-                        v3.x -= dx; v3.y += dy;
-                        customWaveVertices.push_back(v0);
-                        customWaveVertices.push_back(v1);
-                        customWaveVertices.push_back(v2);
-                        customWaveVertices.push_back(v0);
-                        customWaveVertices.push_back(v2);
-                        customWaveVertices.push_back(v3);
+                        const float dx = pointSize / static_cast<float>(std::max(1, m_nTexSizeX));
+                        const float dy = pointSize / static_cast<float>(std::max(1, m_nTexSizeY));
+                        for (const auto& point : wavePoints)
+                        {
+                            DX::CustomWaveVertex v0 = point;
+                            DX::CustomWaveVertex v1 = point;
+                            DX::CustomWaveVertex v2 = point;
+                            DX::CustomWaveVertex v3 = point;
+                            v0.x -= dx; v0.y -= dy;
+                            v1.x += dx; v1.y -= dy;
+                            v2.x += dx; v2.y += dy;
+                            v3.x -= dx; v3.y += dy;
+                            customWaveVertices.push_back(v0);
+                            customWaveVertices.push_back(v1);
+                            customWaveVertices.push_back(v2);
+                            customWaveVertices.push_back(v0);
+                            customWaveVertices.push_back(v2);
+                            customWaveVertices.push_back(v3);
+                        }
+                        appendCustomWaveDraw(start, customWaveVertices.size() - start, wave.bAdditive != 0, true, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
                     }
-                    appendCustomWaveDraw(start, customWaveVertices.size() - start, wave.bAdditive != 0, true);
+                    else
+                    {
+                        customWaveVertices.insert(customWaveVertices.end(), wavePoints.begin(), wavePoints.end());
+                        appendCustomWaveDraw(start, customWaveVertices.size() - start, wave.bAdditive != 0, false, D3D_PRIMITIVE_TOPOLOGY_POINTLIST);
+                    }
                 }
                 else
                 {
@@ -3915,18 +4337,13 @@ void CPlugin::MilkDropRenderFrame(int redraw)
                         const float offsetX = (pass == 1 || pass == 2) ? xInc : 0.0f;
                         const float offsetY = (pass == 2 || pass == 3) ? yInc : 0.0f;
                         const size_t start = customWaveVertices.size();
-                        for (size_t point = 0; point + 1 < linePoints.size(); ++point)
+                        for (DX::CustomWaveVertex point : linePoints)
                         {
-                            DX::CustomWaveVertex a = linePoints[point];
-                            DX::CustomWaveVertex b = linePoints[point + 1];
-                            a.x += offsetX;
-                            a.y += offsetY;
-                            b.x += offsetX;
-                            b.y += offsetY;
-                            customWaveVertices.push_back(a);
-                            customWaveVertices.push_back(b);
+                            point.x += offsetX;
+                            point.y += offsetY;
+                            customWaveVertices.push_back(point);
                         }
-                        appendCustomWaveDraw(start, customWaveVertices.size() - start, wave.bAdditive != 0, false);
+                        appendCustomWaveDraw(start, customWaveVertices.size() - start, wave.bAdditive != 0, false, D3D_PRIMITIVE_TOPOLOGY_LINESTRIP);
                     }
                 }
             }
@@ -3935,6 +4352,9 @@ void CPlugin::MilkDropRenderFrame(int redraw)
         wchar_t dx12OverlayEnabled[8]{};
         const bool forceDx12Overlay = GetEnvironmentVariableW(L"FOO_VIS_MILK2_DX12_OVERLAY", dx12OverlayEnabled, static_cast<DWORD>(std::size(dx12OverlayEnabled))) > 0 &&
                                       wcscmp(dx12OverlayEnabled, L"0") != 0;
+        wchar_t dx12DebugOverlayEnabled[8]{};
+        const bool forceDx12DebugOverlay = GetEnvironmentVariableW(L"FOO_VIS_MILK2_DX12_DEBUG_OVERLAY", dx12DebugOverlayEnabled, static_cast<DWORD>(std::size(dx12DebugOverlayEnabled))) > 0 &&
+                                           wcscmp(dx12DebugOverlayEnabled, L"0") != 0;
         wchar_t dx12FpsText[64]{};
         if (m_bShowFPS || forceDx12Overlay)
         {
@@ -3942,10 +4362,177 @@ void CPlugin::MilkDropRenderFrame(int redraw)
         }
         const wchar_t* dx12PresetText = ((m_bShowPresetInfo || forceDx12Overlay) && m_pState && m_pState->m_szDesc[0]) ? m_pState->m_szDesc : L"";
         const wchar_t* dx12SongText = ((m_bShowSongTitle || forceDx12Overlay) && m_szSongTitle[0]) ? m_szSongTitle : L"";
-        m_lpDX->SetD3D12TextOverlay(dx12PresetText, dx12FpsText, dx12SongText);
+        std::wstring dx12DebugLine;
+        if (forceDx12DebugOverlay)
+        {
+            if (!m_d3d12PresetShaderStatus.empty())
+            {
+                dx12DebugLine = m_d3d12PresetShaderStatus;
+            }
+            else if (m_pState && m_pState->m_nMaxPSVersion <= 0)
+            {
+                dx12DebugLine = L"DX12 MODE: MD1 FIXED PIPELINE";
+            }
+            else
+            {
+                dx12DebugLine = L"DX12 PROBE: NO SHADER TEXT";
+            }
+        }
+        const wchar_t* dx12DebugText = dx12DebugLine.empty() ? L"" : dx12DebugLine.c_str();
+
+        const wchar_t* dx12CenterText = L"";
+        float dx12CenterX = 0.5f;
+        float dx12CenterY = 0.5f;
+        float dx12CenterScale = 1.0f;
+        float dx12CenterR = 1.0f;
+        float dx12CenterG = 1.0f;
+        float dx12CenterB = 1.0f;
+        float dx12CenterA = 0.0f;
+        if (m_supertext.fStartTime >= 0.0f && m_supertext.fDuration > 0.001f && m_supertext.szText[0])
+        {
+            const float progress = std::clamp((GetTime() - m_supertext.fStartTime) / m_supertext.fDuration, 0.0f, 1.0f);
+            if (progress < 1.0f)
+            {
+                const float fadeTime = std::max(0.001f, std::min(m_supertext.fFadeTime, m_supertext.fDuration * 0.5f));
+                const float elapsed = progress * m_supertext.fDuration;
+                const float remaining = (1.0f - progress) * m_supertext.fDuration;
+                const float fadeIn = std::clamp(elapsed / fadeTime, 0.0f, 1.0f);
+                const float fadeOut = std::clamp(remaining / fadeTime, 0.0f, 1.0f);
+                const float fade = std::min(fadeIn, fadeOut);
+                const float grownScale = 1.0f + (m_supertext.fGrowth - 1.0f) * progress;
+
+                dx12CenterText = m_supertext.szText;
+                dx12CenterX = std::clamp(m_supertext.fX, 0.0f, 1.0f);
+                dx12CenterY = std::clamp(m_supertext.fY, 0.0f, 1.0f);
+                dx12CenterScale = std::clamp((m_supertext.fFontSize / 30.0f) * grownScale, 0.75f, 5.0f);
+                dx12CenterR = std::clamp(m_supertext.nColorR / 255.0f, 0.0f, 1.0f);
+                dx12CenterG = std::clamp(m_supertext.nColorG / 255.0f, 0.0f, 1.0f);
+                dx12CenterB = std::clamp(m_supertext.nColorB / 255.0f, 0.0f, 1.0f);
+                dx12CenterA = std::clamp(fade, 0.0f, 1.0f);
+                m_supertext.bRedrawSuperText = false;
+            }
+            else
+            {
+                m_supertext.fStartTime = -1.0f;
+                m_supertext.bRedrawSuperText = false;
+            }
+        }
+        m_lpDX->SetD3D12TextOverlay(dx12PresetText,
+                                    dx12FpsText,
+                                    dx12SongText,
+                                    dx12DebugText,
+                                    dx12CenterText,
+                                    dx12CenterX,
+                                    dx12CenterY,
+                                    dx12CenterScale,
+                                    dx12CenterR,
+                                    dx12CenterG,
+                                    dx12CenterB,
+                                    dx12CenterA);
+
+        float dx12HueShaderColors[12] = {
+            1.0f, 1.0f, 1.0f,
+            1.0f, 1.0f, 1.0f,
+            1.0f, 1.0f, 1.0f,
+            1.0f, 1.0f, 1.0f,
+        };
+        const float dx12ShaderAmount = clean(m_pState->m_fShader.eval(GetTime()), 0.0f);
+        if (dx12ShaderAmount > 0.001f)
+        {
+            for (int i = 0; i < 4; ++i)
+            {
+                float* color = dx12HueShaderColors + i * 3;
+                color[0] = 0.6f + 0.3f * std::sin(GetTime() * 30.0f * 0.0143f + 3 + i * 21 + m_fRandStart[3]);
+                color[1] = 0.6f + 0.3f * std::sin(GetTime() * 30.0f * 0.0107f + 1 + i * 13 + m_fRandStart[1]);
+                color[2] = 0.6f + 0.3f * std::sin(GetTime() * 30.0f * 0.0129f + 6 + i * 9 + m_fRandStart[2]);
+
+                const float maxColor = std::max({color[0], color[1], color[2], 0.001f});
+                for (int c = 0; c < 3; ++c)
+                {
+                    color[c] /= maxColor;
+                    color[c] = 0.5f + 0.5f * color[c];
+                }
+            }
+        }
+
+        float dx12ShaderQ[NUM_Q_VAR]{};
+        for (int vi = 0; vi < NUM_Q_VAR; ++vi)
+        {
+            dx12ShaderQ[vi] = clean(*m_pState->var_pf_q[vi], 0.0f);
+        }
+        float dx12BlurMin[3]{};
+        float dx12BlurMax[3]{};
+        GetSafeBlurMinMax(m_pState, dx12BlurMin, dx12BlurMax);
+        float dx12RotMatrices[24 * 12]{};
+        auto writeDx12RotMatrix = [&](int matrixIndex, const XMMATRIX& matrix) {
+            if (matrixIndex < 0 || matrixIndex >= 24)
+                return;
+
+            XMFLOAT4X4 stored{};
+            XMStoreFloat4x4(&stored, matrix);
+            float* dst = dx12RotMatrices + matrixIndex * 12;
+            for (int col = 0; col < 3; ++col)
+            {
+                for (int row = 0; row < 4; ++row)
+                {
+                    dst[col * 4 + row] = stored.m[row][col];
+                }
+            }
+        };
+        const float dx12ShaderTime = GetTime() - m_fStartTime;
+        for (int i = 0; i < 20; ++i)
+        {
+            XMMATRIX mx = XMMatrixRotationX(m_pState->m_rot_base[i].x + m_pState->m_rot_speed[i].x * dx12ShaderTime);
+            XMMATRIX my = XMMatrixRotationY(m_pState->m_rot_base[i].y + m_pState->m_rot_speed[i].y * dx12ShaderTime);
+            XMMATRIX mz = XMMatrixRotationZ(m_pState->m_rot_base[i].z + m_pState->m_rot_speed[i].z * dx12ShaderTime);
+            XMMATRIX mxlate = XMMatrixTranslation(m_pState->m_xlate[i].x, m_pState->m_xlate[i].y, m_pState->m_xlate[i].z);
+            XMMATRIX matrix = XMMatrixMultiply(mx, mxlate);
+            matrix = XMMatrixMultiply(matrix, mz);
+            matrix = XMMatrixMultiply(matrix, my);
+            writeDx12RotMatrix(i, matrix);
+        }
+        for (int i = 20; i < 24; ++i)
+        {
+            XMMATRIX mx = XMMatrixRotationX(FRAND * 6.28f);
+            XMMATRIX my = XMMatrixRotationY(FRAND * 6.28f);
+            XMMATRIX mz = XMMatrixRotationZ(FRAND * 6.28f);
+            XMMATRIX mxlate = XMMatrixTranslation(FRAND, FRAND, FRAND);
+            XMMATRIX matrix = XMMatrixMultiply(mx, mxlate);
+            matrix = XMMatrixMultiply(matrix, mz);
+            matrix = XMMatrixMultiply(matrix, my);
+            writeDx12RotMatrix(i, matrix);
+        }
+        const float dx12PresetTime = GetTime() - m_pState->GetPresetStartTime();
+        const float dx12PresetTimeWrapped = dx12PresetTime - static_cast<int>(dx12PresetTime / 10000.0f) * 10000.0f;
+        const float dx12RandFrame[4] = {m_rand_frame.x, m_rand_frame.y, m_rand_frame.z, m_rand_frame.w};
+        const float dx12RandPreset[4] = {m_pState->m_rand_preset.x, m_pState->m_rand_preset.y, m_pState->m_rand_preset.z, m_pState->m_rand_preset.w};
+        const float dx12ShaderBass = clean(mdsound.imm_rel[0], bass);
+        const float dx12ShaderMids = clean(mdsound.imm_rel[1], mids);
+        const float dx12ShaderTreble = clean(mdsound.imm_rel[2], treble);
+        const float dx12ShaderBassAtt = clean(mdsound.avg_rel[0], dx12ShaderBass);
+        const float dx12ShaderMidsAtt = clean(mdsound.avg_rel[1], dx12ShaderMids);
+        const float dx12ShaderTrebleAtt = clean(mdsound.avg_rel[2], dx12ShaderTreble);
+        m_lpDX->SetD3D12PresetShaderRuntimeConstants(dx12PresetTimeWrapped,
+                                                     GetFps(),
+                                                     static_cast<float>(GetFrame()),
+                                                     clean(*m_pState->var_pf_progress, 0.0f),
+                                                     dx12ShaderBass,
+                                                     dx12ShaderMids,
+                                                     dx12ShaderTreble,
+                                                     dx12ShaderBassAtt,
+                                                     dx12ShaderMidsAtt,
+                                                     dx12ShaderTrebleAtt,
+                                                     dx12ShaderQ,
+                                                     dx12RandFrame,
+                                                     dx12RandPreset,
+                                                     dx12BlurMin,
+                                                     dx12BlurMax,
+                                                     dx12RotMatrices);
 
         m_lpDX->DrawWaveform(m_sound.fWaveform[0].data(),
                              m_sound.fWaveform[1].data(),
+                             m_sound.fSpectrum[0].data(),
+                             m_sound.fSpectrum[1].data(),
                              NUM_AUDIO_BUFFER_SAMPLES,
                              bass,
                              mids,
@@ -3976,13 +4563,16 @@ void CPlugin::MilkDropRenderFrame(int redraw)
                              clean(*m_pState->var_pf_wave_brighten, 0.0f) > 0.5f,
                              static_cast<int>(clean(*m_pState->var_pf_wave_mode, 0.0f)),
                              clean(*m_pState->var_pf_wave_mystery, 0.0f),
+                             clean(m_pState->m_fWaveSmoothing.eval(GetTime()), 0.0f),
+                             dx12WaveAlphaVolumeScale,
                              clean(*m_pState->var_pf_darken_center, 0.0f) > 0.5f,
                              clean(*m_pState->var_pf_gamma, 1.0f),
                              clean(*m_pState->var_pf_invert, 0.0f) > 0.5f,
                              clean(*m_pState->var_pf_brighten, 0.0f) > 0.5f,
                              clean(*m_pState->var_pf_darken, 0.0f) > 0.5f,
                              clean(*m_pState->var_pf_solarize, 0.0f) > 0.5f,
-                             clean(m_pState->m_fShader.eval(GetTime()), 0.0f),
+                             dx12ShaderAmount,
+                             dx12HueShaderColors,
                              std::clamp(1.0f - (clean(*m_pState->var_pf_blur1max, 1.0f) - clean(*m_pState->var_pf_blur1min, 0.0f)), 0.0f, 1.0f),
                              clean(*m_pState->var_pf_blur1_edge_darken, 0.25f),
                              clean(*m_pState->var_pf_ob_size, 0.0f),
@@ -4011,7 +4601,9 @@ void CPlugin::MilkDropRenderFrame(int redraw)
                              customWaveDraws.empty() ? nullptr : customWaveDraws.data(),
                              customWaveDraws.size(),
                              textureWarpVertices.empty() ? nullptr : textureWarpVertices.data(),
-                             textureWarpVertices.size());
+                             textureWarpVertices.size(),
+                             m_nGridX,
+                             m_nGridY);
 
         if (!redraw)
         {
@@ -6014,7 +6606,14 @@ void CPlugin::GenPlasma(int x0, int x1, int y0, int y1, float dt)
 void CPlugin::LoadPreset(const wchar_t* szPresetFilename, float fBlendTime)
 {
     if (IsD3D12Mode())
-        fBlendTime = 0.0f;
+    {
+        wchar_t dx12PresetBlendEnabled[8]{};
+        const bool enableDx12PresetBlend =
+            GetEnvironmentVariableW(L"FOO_VIS_MILK2_DX12_PRESET_BLEND", dx12PresetBlendEnabled, static_cast<DWORD>(std::size(dx12PresetBlendEnabled))) > 0 &&
+            wcscmp(dx12PresetBlendEnabled, L"0") != 0;
+        if (!enableDx12PresetBlend)
+            fBlendTime = 0.0f;
+    }
 
     OutputDebugString(szPresetFilename);
     //OutputDebugString(L"\n");
@@ -6095,7 +6694,10 @@ void CPlugin::LoadPreset(const wchar_t* szPresetFilename, float fBlendTime)
         if (!IsD3D12Mode())
             LoadShaders(&m_shaders, m_pState, false);
         else
+        {
             SelectD3D12PresetTexture();
+            ProbeD3D12PresetShaders(m_pState);
+        }
 
         OnFinishedLoadingPreset();
     }
@@ -6134,7 +6736,8 @@ void CPlugin::LoadPresetTick()
     if (m_nLoadingPreset == 2 || m_nLoadingPreset == 5)
     {
         // Just loads one shader (warp or comp) then returns.
-        LoadShaders(&m_NewShaders, m_pNewState, true);
+        if (!IsD3D12Mode())
+            LoadShaders(&m_NewShaders, m_pNewState, true);
     }
     else if (m_nLoadingPreset == 8)
     {
@@ -6168,11 +6771,73 @@ void CPlugin::LoadPresetTick()
         // End slow-preset-load mode.
         m_nLoadingPreset = 0;
 
+        if (IsD3D12Mode())
+        {
+            SelectD3D12PresetTexture();
+            ProbeD3D12PresetShaders(m_pState);
+        }
+
         OnFinishedLoadingPreset();
     }
 
     if (m_nLoadingPreset > 0)
         m_nLoadingPreset++;
+}
+
+void CPlugin::CaptureD3D12VisualState()
+{
+    m_d3d12ResumeFramePixels.clear();
+    m_d3d12ResumeFrameWidth = 0;
+    m_d3d12ResumeFrameHeight = 0;
+
+    if (!IsD3D12Mode() || !m_lpDX)
+        return;
+
+    std::vector<uint8_t> pixels;
+    UINT width = 0;
+    UINT height = 0;
+    bool captured = false;
+    try
+    {
+        captured = m_lpDX->CaptureD3D12Frame(&pixels, &width, &height);
+    }
+    catch (...)
+    {
+        captured = false;
+    }
+
+    if (captured && width > 0 && height > 0 && !pixels.empty())
+    {
+        m_d3d12ResumeFramePixels = std::move(pixels);
+        m_d3d12ResumeFrameWidth = width;
+        m_d3d12ResumeFrameHeight = height;
+    }
+}
+
+void CPlugin::RestoreD3D12VisualState()
+{
+    if (!IsD3D12Mode() || !m_lpDX)
+        return;
+
+    if (m_d3d12ResumeFramePixels.empty() || m_d3d12ResumeFrameWidth == 0 || m_d3d12ResumeFrameHeight == 0)
+        return;
+
+    bool restored = false;
+    try
+    {
+        restored = m_lpDX->SetD3D12ResumeFeedback(m_d3d12ResumeFrameWidth, m_d3d12ResumeFrameHeight, m_d3d12ResumeFramePixels);
+    }
+    catch (...)
+    {
+        restored = false;
+    }
+
+    if (restored)
+    {
+        m_d3d12ResumeFramePixels.clear();
+        m_d3d12ResumeFrameWidth = 0;
+        m_d3d12ResumeFrameHeight = 0;
+    }
 }
 
 void CPlugin::ResumeD3D12AfterWindowSwap()
@@ -6185,7 +6850,7 @@ void CPlugin::ResumeD3D12AfterWindowSwap()
     m_pState->m_bBlending = false;
     m_fPresetStartTime = GetTime();
     m_fNextPresetTime = -1.0f;
-    SelectD3D12PresetTexture();
+    ProbeD3D12PresetShaders(m_pState);
 }
 
 void CPlugin::SetPresetListPosition(std::wstring search)
