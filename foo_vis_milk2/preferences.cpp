@@ -38,6 +38,9 @@ static cfg_bool cfg_bShowShaderHelp(guid_cfg_bShowShaderHelp, default_bShowShade
 static cfg_bool cfg_bPresetLockedByCode(guid_cfg_bPresetLockedByCode, default_bPresetLockedByCode);
 static cfg_bool cfg_bEnableDownmix(guid_cfg_bEnableDownmix, default_bEnableDownmix);
 static cfg_bool cfg_bShowAlbum(guid_cfg_bShowAlbum, default_bShowAlbum);
+static cfg_bool cfg_bEnableMouseWheelVolume(guid_cfg_bEnableMouseWheelVolume, default_bEnableMouseWheelVolume);
+static cfg_bool cfg_bEnableMouseClickPlayPause(guid_cfg_bEnableMouseClickPlayPause, default_bEnableMouseClickPlayPause);
+static cfg_bool cfg_bSeparateClickPromptFont(guid_cfg_bSeparateClickPromptFont, default_bSeparateClickPromptFont);
 static cfg_bool cfg_bEnableHDR(guid_cfg_bEnableHDR, default_bEnableHDR);
 static cfg_int cfg_max_fps_fs(guid_cfg_max_fps_fs, static_cast<int64_t>(default_max_fps_fs));
 static cfg_int cfg_n16BitGamma(guid_cfg_n16BitGamma, static_cast<int64_t>(default_n16BitGamma));
@@ -89,6 +92,8 @@ BOOL milk2_preferences_page::OnInitDialog(CWindow, LPARAM)
     CheckDlgButton(IDC_CB_NORATING2, static_cast<UINT>(!cfg_bEnableRating));
     CheckDlgButton(IDC_CB_PRESS_F1_MSG, static_cast<UINT>(cfg_bShowPressF1ForHelp));
     CheckDlgButton(IDC_CB_NOCOMPSHADER, static_cast<UINT>(cfg_bSkipCompShader));
+    CheckDlgButton(IDC_CB_MOUSE_WHEEL_VOLUME, static_cast<UINT>(cfg_bEnableMouseWheelVolume));
+    CheckDlgButton(IDC_CB_MOUSE_CLICK_PLAYPAUSE, static_cast<UINT>(cfg_bEnableMouseClickPlayPause));
 
     // Maximum FPS.
     CheckDlgButton(IDC_CB_FSPT, static_cast<UINT>(cfg_allow_page_tearing_fs));
@@ -481,6 +486,8 @@ void milk2_preferences_page::reset()
     CheckDlgButton(IDC_CB_NORATING2, static_cast<UINT>(!default_bEnableRating));
     CheckDlgButton(IDC_CB_PRESS_F1_MSG, static_cast<UINT>(default_bShowPressF1ForHelp));
     CheckDlgButton(IDC_CB_NOCOMPSHADER, static_cast<UINT>(default_bSkipCompShader));
+    CheckDlgButton(IDC_CB_MOUSE_WHEEL_VOLUME, static_cast<UINT>(default_bEnableMouseWheelVolume));
+    CheckDlgButton(IDC_CB_MOUSE_CLICK_PLAYPAUSE, static_cast<UINT>(default_bEnableMouseClickPlayPause));
 
     CheckDlgButton(IDC_CB_FSPT, static_cast<UINT>(default_allow_page_tearing_fs));
     UpdateMaxFps(FULLSCREEN);
@@ -551,6 +558,8 @@ void milk2_preferences_page::apply()
     cfg_bEnableRating = !static_cast<bool>(IsDlgButtonChecked(IDC_CB_NORATING2));
     cfg_bShowPressF1ForHelp = static_cast<bool>(IsDlgButtonChecked(IDC_CB_PRESS_F1_MSG));
     cfg_bSkipCompShader = static_cast<bool>(IsDlgButtonChecked(IDC_CB_NOCOMPSHADER));
+    cfg_bEnableMouseWheelVolume = static_cast<bool>(IsDlgButtonChecked(IDC_CB_MOUSE_WHEEL_VOLUME));
+    cfg_bEnableMouseClickPlayPause = static_cast<bool>(IsDlgButtonChecked(IDC_CB_MOUSE_CLICK_PLAYPAUSE));
 
     cfg_allow_page_tearing_fs = static_cast<bool>(IsDlgButtonChecked(IDC_CB_FSPT));
     SaveMaxFps(FULLSCREEN);
@@ -631,10 +640,15 @@ void milk2_preferences_page::apply()
         m_resetpage = false;
     }
 
+    // Keep the in-memory panel settings in sync with the cfg vars immediately.
+    // Otherwise, a subsequent get_configuration() can write stale values back.
+    milk2_sync_runtime_config_from_cfg();
+
     OnChanged(); // The dialog content has not changed but the flags have;
                  // the currently shown values now match the settings so the
                  // apply button can be disabled.
-    ::SendMessage(g_hWindow, WM_CONFIG_CHANGE, (WPARAM)0, (LPARAM)0);
+    if (::IsWindow(g_hWindow))
+        ::PostMessage(g_hWindow, WM_CONFIG_CHANGE, (WPARAM)0, (LPARAM)0);
 }
 
 // Returns whether the dialog content is different from the current configuration;
@@ -647,6 +661,8 @@ bool milk2_preferences_page::HasChanged() const
                             (static_cast<bool>(IsDlgButtonChecked(IDC_CB_NORATING2)) == cfg_bEnableRating) ||
                             (static_cast<bool>(IsDlgButtonChecked(IDC_CB_PRESS_F1_MSG)) != cfg_bShowPressF1ForHelp) ||
                             (static_cast<bool>(IsDlgButtonChecked(IDC_CB_NOCOMPSHADER)) != cfg_bSkipCompShader) ||
+                            (static_cast<bool>(IsDlgButtonChecked(IDC_CB_MOUSE_WHEEL_VOLUME)) != cfg_bEnableMouseWheelVolume) ||
+                            (static_cast<bool>(IsDlgButtonChecked(IDC_CB_MOUSE_CLICK_PLAYPAUSE)) != cfg_bEnableMouseClickPlayPause) ||
                             (static_cast<bool>(IsDlgButtonChecked(IDC_CB_FSPT)) != cfg_allow_page_tearing_fs) ||
                             (static_cast<bool>(IsDlgButtonChecked(IDC_CB_HARDCUTS)) != cfg_bHardCutsDisabled) ||
                             (static_cast<bool>(IsDlgButtonChecked(IDC_CB_AUTOGAMMA2)) != cfg_bAutoGamma) ||
@@ -1222,14 +1238,17 @@ void milk2_config::reset()
     //settings.m_bMilkdropScrollLockState = settings.m_bPresetLockOnAtStartup;
 
     //--- Extras
-    settings.m_bEnableDownmix = default_bEnableDownmix;
-    settings.m_bShowAlbum = default_bShowAlbum;
-    settings.m_bEnableHDR = default_bEnableHDR;
+    settings.m_bEnableDownmix = cfg_bEnableDownmix;
+    settings.m_bShowAlbum = cfg_bShowAlbum;
+    settings.m_bEnableMouseWheelVolume = cfg_bEnableMouseWheelVolume;
+    settings.m_bEnableMouseClickPlayPause = cfg_bEnableMouseClickPlayPause;
+    settings.m_bSeparateClickPromptFont = cfg_bSeparateClickPromptFont;
+    settings.m_bEnableHDR = cfg_bEnableHDR;
     settings.m_bSkipCompShader = static_cast<uint32_t>(cfg_bSkipCompShader);
-    settings.m_nBackBufferFormat = default_nBackBufferFormat;
-    settings.m_nDepthBufferFormat = default_nDepthBufferFormat;
-    settings.m_nBackBufferCount = default_nBackBufferCount;
-    settings.m_nMinFeatureLevel = default_nMinFeatureLevel;
+    settings.m_nBackBufferFormat = static_cast<uint32_t>(cfg_nBackBufferFormat);
+    settings.m_nDepthBufferFormat = static_cast<uint32_t>(cfg_nDepthBufferFormat);
+    settings.m_nBackBufferCount = static_cast<uint32_t>(cfg_nBackBufferCount);
+    settings.m_nMinFeatureLevel = static_cast<uint32_t>(cfg_nMinFeatureLevel);
     //settings.m_nFpsLimit = default_nFpsLimit;
 
     swprintf_s(settings.m_szTitleFormat, L"%ls", pfc::wideFromUTF8(cfg_szTitleFormat.get()).c_str());
@@ -1471,6 +1490,9 @@ void milk2_config::build(ui_element_config_builder& builder, const bool full_res
         cfg_nMinFeatureLevel = settings.m_nMinFeatureLevel;
         cfg_bEnableDownmix = settings.m_bEnableDownmix;
         cfg_bShowAlbum = settings.m_bShowAlbum;
+        cfg_bEnableMouseWheelVolume = settings.m_bEnableMouseWheelVolume;
+        cfg_bEnableMouseClickPlayPause = settings.m_bEnableMouseClickPlayPause;
+        cfg_bSeparateClickPromptFont = settings.m_bSeparateClickPromptFont;
         cfg_bEnableHDR = settings.m_bEnableHDR;
 
         cfg_szTitleFormat = pfc::utf8FromWide(settings.m_szTitleFormat);
@@ -1478,5 +1500,21 @@ void milk2_config::build(ui_element_config_builder& builder, const bool full_res
 
         cfg_szPresetDir.set(pfc::utf8FromWide(settings.m_szPresetDir));
     }
+}
+
+void milk2_config::persist_runtime_settings() const
+{
+    cfg_bShowFPS = settings.m_bShowFPS;
+    cfg_bShowRating = settings.m_bShowRating;
+    cfg_bShowPresetInfo = settings.m_bShowPresetInfo;
+    cfg_bShowSongTitle = settings.m_bShowSongTitle;
+    cfg_bShowSongTime = settings.m_bShowSongTime;
+    cfg_bShowSongLen = settings.m_bShowSongLen;
+    cfg_bShowShaderHelp = settings.m_bShowShaderHelp;
+    cfg_bEnableDownmix = settings.m_bEnableDownmix;
+    cfg_bShowAlbum = settings.m_bShowAlbum;
+    cfg_bEnableMouseWheelVolume = settings.m_bEnableMouseWheelVolume;
+    cfg_bEnableMouseClickPlayPause = settings.m_bEnableMouseClickPlayPause;
+    cfg_bSeparateClickPromptFont = settings.m_bSeparateClickPromptFont;
 }
 #pragma endregion

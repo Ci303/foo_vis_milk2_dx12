@@ -84,11 +84,75 @@
 //#include "resource.h"
 #include <nu/AutoChar.h>
 #include <nu/AutoWide.h>
+#include <wincodec.h>
 
 //#pragma comment(lib, "d3dcompiler.lib")
 //#pragma comment(lib, "dxguid.lib")
 
 int warand() { return rand(); }
+
+static constexpr size_t kD3D12MaxPresetTextureLayers = static_cast<size_t>(DX::D3D12Resources::MaxPresetTextureLayers());
+static constexpr const char* kD3D12PresetShaderCacheVersion = "coordoverload1";
+
+static void WriteD3D12PluginLogLine(const wchar_t* message)
+{
+    wchar_t logValue[MAX_PATH]{};
+    const DWORD valueLength = GetEnvironmentVariableW(L"FOO_VIS_MILK2_DX12_LOG", logValue, static_cast<DWORD>(std::size(logValue)));
+    if (valueLength == 0 || wcscmp(logValue, L"0") == 0)
+    {
+        return;
+    }
+
+    wchar_t logPath[MAX_PATH]{};
+    if (wcscmp(logValue, L"1") != 0 && wcscmp(logValue, L"true") != 0 && wcscmp(logValue, L"TRUE") != 0)
+    {
+        wcscpy_s(logPath, logValue);
+    }
+    else
+    {
+        const DWORD tempLength = GetTempPathW(static_cast<DWORD>(std::size(logPath)), logPath);
+        if (tempLength == 0 || tempLength >= std::size(logPath))
+        {
+            return;
+        }
+        wcscat_s(logPath, L"foo_vis_milk2_dx12.log");
+    }
+
+    HANDLE file = CreateFileW(logPath,
+                              FILE_APPEND_DATA,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE,
+                              nullptr,
+                              OPEN_ALWAYS,
+                              FILE_ATTRIBUTE_NORMAL,
+                              nullptr);
+    if (file == INVALID_HANDLE_VALUE)
+    {
+        return;
+    }
+
+    SYSTEMTIME now{};
+    GetLocalTime(&now);
+    wchar_t wideLine[2048]{};
+    swprintf_s(wideLine,
+               L"%04u-%02u-%02u %02u:%02u:%02u.%03u plugin %ls\r\n",
+               now.wYear,
+               now.wMonth,
+               now.wDay,
+               now.wHour,
+               now.wMinute,
+               now.wSecond,
+               now.wMilliseconds,
+               message ? message : L"");
+
+    char utf8Line[4096]{};
+    const int bytes = WideCharToMultiByte(CP_UTF8, 0, wideLine, -1, utf8Line, static_cast<int>(std::size(utf8Line)), nullptr, nullptr);
+    if (bytes > 1)
+    {
+        DWORD written = 0;
+        WriteFile(file, utf8Line, static_cast<DWORD>(bytes - 1), &written, nullptr);
+    }
+    CloseHandle(file);
+}
 
 void NSEEL_HOSTSTUB_EnterMutex() {}
 
@@ -835,7 +899,12 @@ bool CPlugin::PanelSettings(plugin_config* settings)
     //m_multisample_w = {settings->m_multisample_w.Count, 0U};
 
     //m_start_fullscreen = settings->m_start_fullscreen;
-    m_max_fps_fs = settings->m_max_fps_fs;
+    // The foobar2000 component wrapper paces embedded rendering from the
+    // user's configured maximum frame rate. Keep the shell limiter disabled in
+    // windowed mode, and enable it only while the UI element is fullscreen,
+    // where external paints can otherwise bypass the wrapper cadence.
+    m_max_fps_fs = 0;
+    m_max_fps_w = 0;
     m_show_press_f1_msg = settings->m_show_press_f1_msg;
     m_allow_page_tearing_fs = settings->m_allow_page_tearing_fs;
     //m_minimize_winamp = settings->m_minimize_winamp;
@@ -919,6 +988,11 @@ bool CPlugin::PanelSettings(plugin_config* settings)
 
     return true;
 }
+
+void CPlugin::SetFoobarFullscreenFrameLimit(uint32_t max_fps) noexcept
+{
+    m_max_fps_fs = static_cast<int>(max_fps);
+}
 #endif
 
 //----------------------------------------------------------------------
@@ -972,6 +1046,736 @@ static void StripComments(char* str)
     }
 
     *dest++ = '\0';
+}
+
+static bool IsShaderIdentifierChar(char c);
+
+static bool MatchShaderToken(const std::string& text, size_t pos, const char* token)
+{
+    const size_t tokenLength = strlen(token);
+    if (pos + tokenLength > text.size())
+    {
+        return false;
+    }
+    if (text.compare(pos, tokenLength, token) != 0)
+    {
+        return false;
+    }
+    if (pos > 0 && IsShaderIdentifierChar(text[pos - 1]))
+    {
+        return false;
+    }
+    if (pos + tokenLength < text.size() && IsShaderIdentifierChar(text[pos + tokenLength]))
+    {
+        return false;
+    }
+    return true;
+}
+
+enum class D3D12Tex2DCallKind
+{
+    Sample,
+    SampleBias,
+    SampleLevel
+};
+
+struct D3D12SamplerRewriteTarget
+{
+    std::string textureName;
+    std::string samplerName;
+};
+
+static bool MatchD3D12Tex2DCall(const std::string& text, size_t pos, size_t* tokenLength, D3D12Tex2DCallKind* kind)
+{
+    struct Candidate
+    {
+        const char* token;
+        D3D12Tex2DCallKind kind;
+    };
+
+    static constexpr Candidate candidates[] = {
+        {"tex2Dbias", D3D12Tex2DCallKind::SampleBias},
+        {"tex2dbias", D3D12Tex2DCallKind::SampleBias},
+        {"tex2Dlod", D3D12Tex2DCallKind::SampleLevel},
+        {"tex2dlod", D3D12Tex2DCallKind::SampleLevel},
+        {"tex2D", D3D12Tex2DCallKind::Sample},
+        {"tex2d", D3D12Tex2DCallKind::Sample},
+    };
+
+    for (const Candidate& candidate : candidates)
+    {
+        if (MatchShaderToken(text, pos, candidate.token))
+        {
+            if (tokenLength)
+            {
+                *tokenLength = strlen(candidate.token);
+            }
+            if (kind)
+            {
+                *kind = candidate.kind;
+            }
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static std::string StripD3D12SamplerFilterPrefix(std::string rootName)
+{
+    if (rootName.size() <= 3 || rootName[2] != '_')
+    {
+        return rootName;
+    }
+
+    char filter[3]{rootName[0], rootName[1], '\0'};
+    _strupr_s(filter);
+    if (strcmp(filter, "FW") && strcmp(filter, "FC") && strcmp(filter, "PW") && strcmp(filter, "PC") &&
+        strcmp(filter, "WF") && strcmp(filter, "CF") && strcmp(filter, "WP") && strcmp(filter, "CP"))
+    {
+        return rootName;
+    }
+
+    return rootName.substr(3);
+}
+
+static bool IsD3D12BuiltInSamplerRootName(const std::string& rootName)
+{
+    return rootName.empty() ||
+           !_stricmp(rootName.c_str(), "main") ||
+           !_stricmp(rootName.c_str(), "fc_main") ||
+           !_stricmp(rootName.c_str(), "pc_main") ||
+           !_stricmp(rootName.c_str(), "fw_main") ||
+           !_stricmp(rootName.c_str(), "pw_main") ||
+           !_strnicmp(rootName.c_str(), "blur", 4) ||
+           !_strnicmp(rootName.c_str(), "noise", 5);
+}
+
+static void StripD3D12LegacyBuiltInSamplerDeclarations(char* shaderText, size_t shaderTextCapacity)
+{
+    if (!shaderText || shaderTextCapacity == 0)
+    {
+        return;
+    }
+
+    const std::string input(shaderText);
+    std::string output;
+    output.reserve(input.size());
+
+    size_t cursor = 0;
+    while (cursor < input.size())
+    {
+        size_t samplerPos = input.find("sampler", cursor);
+        while (samplerPos != std::string::npos &&
+               !MatchShaderToken(input, samplerPos, "sampler") &&
+               !MatchShaderToken(input, samplerPos, "sampler2D"))
+        {
+            samplerPos = input.find("sampler", samplerPos + 7);
+        }
+
+        if (samplerPos == std::string::npos)
+        {
+            output.append(input, cursor, std::string::npos);
+            break;
+        }
+
+        size_t tokenLength = MatchShaderToken(input, samplerPos, "sampler2D") ? 9 : 7;
+        size_t namePos = samplerPos + tokenLength;
+        while (namePos < input.size() && isspace(static_cast<unsigned char>(input[namePos])))
+        {
+            ++namePos;
+        }
+
+        if (namePos + 8 > input.size() || input.compare(namePos, 8, "sampler_") != 0)
+        {
+            output.append(input, cursor, samplerPos + tokenLength - cursor);
+            cursor = samplerPos + tokenLength;
+            continue;
+        }
+
+        size_t nameEnd = namePos;
+        while (nameEnd < input.size() && IsShaderIdentifierChar(input[nameEnd]))
+        {
+            ++nameEnd;
+        }
+
+        const std::string rootName = StripD3D12SamplerFilterPrefix(input.substr(namePos + 8, nameEnd - namePos - 8));
+        if (!IsD3D12BuiltInSamplerRootName(rootName))
+        {
+            output.append(input, cursor, samplerPos + tokenLength - cursor);
+            cursor = samplerPos + tokenLength;
+            continue;
+        }
+
+        size_t statementEnd = input.find(';', nameEnd);
+        if (statementEnd == std::string::npos)
+        {
+            output.append(input, cursor, std::string::npos);
+            break;
+        }
+
+        output.append(input, cursor, samplerPos - cursor);
+        cursor = statementEnd + 1;
+        while (cursor < input.size() && (input[cursor] == '\r' || input[cursor] == '\n'))
+        {
+            ++cursor;
+        }
+    }
+
+    if (output.size() + 1 < shaderTextCapacity)
+    {
+        strcpy_s(shaderText, shaderTextCapacity, output.c_str());
+    }
+}
+
+enum class D3D12SamplerMode
+{
+    LinearWrap,
+    LinearClamp,
+    PointWrap,
+    PointClamp,
+};
+
+static D3D12SamplerMode GetD3D12SamplerModeFromToken(const std::string& samplerToken, D3D12SamplerMode fallback)
+{
+    if (samplerToken.size() <= 11 || _strnicmp(samplerToken.c_str(), "sampler_", 8))
+    {
+        return fallback;
+    }
+
+    const std::string rootName = samplerToken.substr(8);
+    if (rootName.size() <= 3 || rootName[2] != '_')
+    {
+        return fallback;
+    }
+
+    char filter[3]{rootName[0], rootName[1], '\0'};
+    _strupr_s(filter);
+    if (!strcmp(filter, "FW") || !strcmp(filter, "WF"))
+    {
+        return D3D12SamplerMode::LinearWrap;
+    }
+    if (!strcmp(filter, "FC") || !strcmp(filter, "CF"))
+    {
+        return D3D12SamplerMode::LinearClamp;
+    }
+    if (!strcmp(filter, "PW") || !strcmp(filter, "WP"))
+    {
+        return D3D12SamplerMode::PointWrap;
+    }
+    if (!strcmp(filter, "PC") || !strcmp(filter, "CP"))
+    {
+        return D3D12SamplerMode::PointClamp;
+    }
+    return fallback;
+}
+
+static const char* GetD3D12SamplerName(D3D12SamplerMode mode)
+{
+    switch (mode)
+    {
+        case D3D12SamplerMode::LinearClamp:
+            return "sampler_d3d12_linear_clamp";
+        case D3D12SamplerMode::PointWrap:
+            return "sampler_d3d12_point_wrap";
+        case D3D12SamplerMode::PointClamp:
+            return "sampler_d3d12_point_clamp";
+        default:
+            return "sampler_d3d12_linear_wrap";
+    }
+}
+
+static bool TryGetD3D12BuiltinSamplerTarget(const std::string& samplerToken, D3D12SamplerRewriteTarget* target)
+{
+    if (!target || samplerToken.size() <= 8 || _strnicmp(samplerToken.c_str(), "sampler_", 8))
+    {
+        return false;
+    }
+
+    const std::string rootName = StripD3D12SamplerFilterPrefix(samplerToken.substr(8));
+    if (!_stricmp(rootName.c_str(), "main"))
+    {
+        target->textureName = "d3d12_source_tex";
+        target->samplerName = GetD3D12SamplerName(GetD3D12SamplerModeFromToken(samplerToken, D3D12SamplerMode::LinearWrap));
+        return true;
+    }
+    if (!_stricmp(rootName.c_str(), "blur1"))
+    {
+        target->textureName = "d3d12_blur1";
+        target->samplerName = GetD3D12SamplerName(GetD3D12SamplerModeFromToken(samplerToken, D3D12SamplerMode::LinearClamp));
+        return true;
+    }
+    if (!_stricmp(rootName.c_str(), "blur2"))
+    {
+        target->textureName = "d3d12_blur2";
+        target->samplerName = GetD3D12SamplerName(GetD3D12SamplerModeFromToken(samplerToken, D3D12SamplerMode::LinearClamp));
+        return true;
+    }
+    if (!_stricmp(rootName.c_str(), "blur3"))
+    {
+        target->textureName = "d3d12_blur3";
+        target->samplerName = GetD3D12SamplerName(GetD3D12SamplerModeFromToken(samplerToken, D3D12SamplerMode::LinearClamp));
+        return true;
+    }
+    if (!_stricmp(rootName.c_str(), "noise_lq"))
+    {
+        target->textureName = "d3d12_noise_lq_tex";
+        target->samplerName = GetD3D12SamplerName(GetD3D12SamplerModeFromToken(samplerToken, D3D12SamplerMode::LinearWrap));
+        return true;
+    }
+    if (!_stricmp(rootName.c_str(), "noise_lq_lite"))
+    {
+        target->textureName = "d3d12_noise_lq_lite_tex";
+        target->samplerName = GetD3D12SamplerName(GetD3D12SamplerModeFromToken(samplerToken, D3D12SamplerMode::LinearWrap));
+        return true;
+    }
+    if (!_stricmp(rootName.c_str(), "noise_mq"))
+    {
+        target->textureName = "d3d12_noise_mq_tex";
+        target->samplerName = GetD3D12SamplerName(GetD3D12SamplerModeFromToken(samplerToken, D3D12SamplerMode::LinearWrap));
+        return true;
+    }
+    if (!_stricmp(rootName.c_str(), "noise_hq"))
+    {
+        target->textureName = "d3d12_noise_hq_tex";
+        target->samplerName = GetD3D12SamplerName(GetD3D12SamplerModeFromToken(samplerToken, D3D12SamplerMode::LinearWrap));
+        return true;
+    }
+
+    return false;
+}
+
+static bool TryGetD3D12NoiseVolSamplerTarget(const std::string& samplerToken, D3D12SamplerRewriteTarget* target)
+{
+    if (!target || samplerToken.size() <= 8 || _strnicmp(samplerToken.c_str(), "sampler_", 8))
+    {
+        return false;
+    }
+
+    const std::string rootName = StripD3D12SamplerFilterPrefix(samplerToken.substr(8));
+    if (!_stricmp(rootName.c_str(), "noisevol_lq"))
+    {
+        target->textureName = "d3d12_noisevol_lq";
+        target->samplerName = GetD3D12SamplerName(GetD3D12SamplerModeFromToken(samplerToken, D3D12SamplerMode::LinearWrap));
+        return true;
+    }
+    if (!_stricmp(rootName.c_str(), "noisevol_hq"))
+    {
+        target->textureName = "d3d12_noisevol_hq";
+        target->samplerName = GetD3D12SamplerName(GetD3D12SamplerModeFromToken(samplerToken, D3D12SamplerMode::LinearWrap));
+        return true;
+    }
+
+    return false;
+}
+
+static bool TryGetD3D12DiskSamplerTarget(const std::string& samplerToken,
+                                         const std::vector<std::pair<std::string, std::wstring>>& diskAliases,
+                                         const std::vector<std::wstring>* sharedRoots,
+                                         D3D12SamplerRewriteTarget* target)
+{
+    if (!target || samplerToken.size() <= 8 || _strnicmp(samplerToken.c_str(), "sampler_", 8))
+    {
+        return false;
+    }
+
+    const char* aliasName = samplerToken.c_str() + 8;
+    std::vector<std::wstring> localRoots;
+    for (const auto& alias : diskAliases)
+    {
+        if (_stricmp(alias.first.c_str(), aliasName))
+        {
+            continue;
+        }
+
+        size_t layer = 0;
+        bool foundLayer = false;
+        const std::vector<std::wstring>& searchRoots = sharedRoots ? *sharedRoots : localRoots;
+        for (; layer < searchRoots.size(); ++layer)
+        {
+            if (!_wcsicmp(searchRoots[layer].c_str(), alias.second.c_str()))
+            {
+                foundLayer = true;
+                break;
+            }
+        }
+
+        if (!foundLayer)
+        {
+            if (sharedRoots || localRoots.size() >= kD3D12MaxPresetTextureLayers)
+            {
+                return false;
+            }
+            localRoots.emplace_back(alias.second);
+            layer = localRoots.size() - 1;
+        }
+
+        if (layer >= kD3D12MaxPresetTextureLayers)
+        {
+            return false;
+        }
+
+        char textureName[64]{};
+        sprintf_s(textureName, "d3d12_layer%zu_tex", layer);
+        target->textureName = textureName;
+        target->samplerName = GetD3D12SamplerName(GetD3D12SamplerModeFromToken(samplerToken, D3D12SamplerMode::LinearWrap));
+        return true;
+    }
+
+    return false;
+}
+
+static void AppendD3D12TextureSample(std::string& output,
+                                     const D3D12SamplerRewriteTarget& target,
+                                     D3D12Tex2DCallKind kind,
+                                     const std::string& coordinateExpression)
+{
+    output += target.textureName;
+    switch (kind)
+    {
+        case D3D12Tex2DCallKind::SampleBias:
+            output += ".SampleBias(";
+            output += target.samplerName;
+            output += ", D3D12TexCoord2(";
+            output += coordinateExpression;
+            output += "), D3D12TexCoordW(";
+            output += coordinateExpression;
+            output += "))";
+            break;
+        case D3D12Tex2DCallKind::SampleLevel:
+            output += ".SampleLevel(";
+            output += target.samplerName;
+            output += ", D3D12TexCoord2(";
+            output += coordinateExpression;
+            output += "), D3D12TexCoordW(";
+            output += coordinateExpression;
+            output += "))";
+            break;
+        default:
+            output += ".Sample(";
+            output += target.samplerName;
+            output += ", D3D12TexCoord2(";
+            output += coordinateExpression;
+            output += "))";
+            break;
+    }
+}
+
+static bool MatchD3D12Tex3DCall(const std::string& text, size_t pos, size_t* tokenLength, D3D12Tex2DCallKind* kind)
+{
+    struct Candidate
+    {
+        const char* token;
+        D3D12Tex2DCallKind kind;
+    };
+
+    static constexpr Candidate candidates[] = {
+        {"tex3Dbias", D3D12Tex2DCallKind::SampleBias},
+        {"tex3dbias", D3D12Tex2DCallKind::SampleBias},
+        {"tex3Dlod", D3D12Tex2DCallKind::SampleLevel},
+        {"tex3dlod", D3D12Tex2DCallKind::SampleLevel},
+        {"tex3D", D3D12Tex2DCallKind::Sample},
+        {"tex3d", D3D12Tex2DCallKind::Sample},
+    };
+
+    for (const Candidate& candidate : candidates)
+    {
+        if (MatchShaderToken(text, pos, candidate.token))
+        {
+            if (tokenLength)
+            {
+                *tokenLength = strlen(candidate.token);
+            }
+            if (kind)
+            {
+                *kind = candidate.kind;
+            }
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static void AppendD3D12Texture3DSample(std::string& output,
+                                       const D3D12SamplerRewriteTarget& target,
+                                       D3D12Tex2DCallKind kind,
+                                       const std::string& coordinateExpression)
+{
+    output += target.textureName;
+    switch (kind)
+    {
+        case D3D12Tex2DCallKind::SampleBias:
+            output += ".SampleBias(";
+            output += target.samplerName;
+            output += ", D3D12TexCoord3(";
+            output += coordinateExpression;
+            output += "), D3D12TexCoordW(";
+            output += coordinateExpression;
+            output += "))";
+            break;
+        case D3D12Tex2DCallKind::SampleLevel:
+            output += ".SampleLevel(";
+            output += target.samplerName;
+            output += ", D3D12TexCoord3(";
+            output += coordinateExpression;
+            output += "), D3D12TexCoordW(";
+            output += coordinateExpression;
+            output += "))";
+            break;
+        default:
+            output += ".Sample(";
+            output += target.samplerName;
+            output += ", D3D12TexCoord3(";
+            output += coordinateExpression;
+            output += "))";
+            break;
+    }
+}
+
+static void RewriteD3D12KnownTex3DCalls(char* shaderText, size_t shaderTextCapacity)
+{
+    if (!shaderText || shaderTextCapacity == 0)
+    {
+        return;
+    }
+
+    const std::string input(shaderText);
+    std::string output;
+    output.reserve(input.size());
+
+    size_t cursor = 0;
+    while (cursor < input.size())
+    {
+        size_t texPos = input.find("tex3", cursor);
+        size_t tokenLength = 0;
+        D3D12Tex2DCallKind callKind = D3D12Tex2DCallKind::Sample;
+        while (texPos != std::string::npos && !MatchD3D12Tex3DCall(input, texPos, &tokenLength, &callKind))
+        {
+            texPos = input.find("tex3", texPos + 4);
+        }
+
+        if (texPos == std::string::npos)
+        {
+            output.append(input, cursor, std::string::npos);
+            break;
+        }
+
+        output.append(input, cursor, texPos - cursor);
+        size_t openParen = texPos + tokenLength;
+        while (openParen < input.size() && isspace(static_cast<unsigned char>(input[openParen])))
+        {
+            ++openParen;
+        }
+        if (openParen >= input.size() || input[openParen] != '(')
+        {
+            output.append(input, texPos, tokenLength);
+            cursor = texPos + tokenLength;
+            continue;
+        }
+
+        size_t samplerPos = openParen + 1;
+        while (samplerPos < input.size() && isspace(static_cast<unsigned char>(input[samplerPos])))
+        {
+            ++samplerPos;
+        }
+
+        size_t samplerEnd = samplerPos;
+        while (samplerEnd < input.size() && IsShaderIdentifierChar(input[samplerEnd]))
+        {
+            ++samplerEnd;
+        }
+        if (samplerEnd == samplerPos)
+        {
+            output.append(input, texPos, tokenLength);
+            cursor = texPos + tokenLength;
+            continue;
+        }
+
+        D3D12SamplerRewriteTarget target;
+        if (!TryGetD3D12NoiseVolSamplerTarget(input.substr(samplerPos, samplerEnd - samplerPos), &target))
+        {
+            output.append(input, texPos, tokenLength);
+            cursor = texPos + tokenLength;
+            continue;
+        }
+
+        size_t commaPos = samplerEnd;
+        while (commaPos < input.size() && isspace(static_cast<unsigned char>(input[commaPos])))
+        {
+            ++commaPos;
+        }
+        if (commaPos >= input.size() || input[commaPos] != ',')
+        {
+            output.append(input, texPos, tokenLength);
+            cursor = texPos + tokenLength;
+            continue;
+        }
+
+        size_t uvStart = commaPos + 1;
+        while (uvStart < input.size() && isspace(static_cast<unsigned char>(input[uvStart])))
+        {
+            ++uvStart;
+        }
+
+        int parenDepth = 1;
+        size_t closeParen = uvStart;
+        for (; closeParen < input.size(); ++closeParen)
+        {
+            if (input[closeParen] == '(')
+            {
+                ++parenDepth;
+            }
+            else if (input[closeParen] == ')')
+            {
+                --parenDepth;
+                if (parenDepth == 0)
+                {
+                    break;
+                }
+            }
+        }
+
+        if (closeParen >= input.size() || parenDepth != 0)
+        {
+            output.append(input, texPos, tokenLength);
+            cursor = texPos + tokenLength;
+            continue;
+        }
+
+        AppendD3D12Texture3DSample(output, target, callKind, input.substr(uvStart, closeParen - uvStart));
+        cursor = closeParen + 1;
+    }
+
+    if (output.size() + 1 < shaderTextCapacity)
+    {
+        strcpy_s(shaderText, shaderTextCapacity, output.c_str());
+    }
+}
+
+static void RewriteD3D12KnownTex2DCalls(char* shaderText,
+                                        size_t shaderTextCapacity,
+                                        const std::vector<std::pair<std::string, std::wstring>>& diskAliases,
+                                        const std::vector<std::wstring>* sharedRoots)
+{
+    if (!shaderText || shaderTextCapacity == 0)
+    {
+        return;
+    }
+
+    const std::string input(shaderText);
+    std::string output;
+    output.reserve(input.size());
+
+    size_t cursor = 0;
+    while (cursor < input.size())
+    {
+        size_t texPos = input.find("tex2", cursor);
+        size_t tokenLength = 0;
+        D3D12Tex2DCallKind callKind = D3D12Tex2DCallKind::Sample;
+        while (texPos != std::string::npos && !MatchD3D12Tex2DCall(input, texPos, &tokenLength, &callKind))
+        {
+            texPos = input.find("tex2", texPos + 4);
+        }
+
+        if (texPos == std::string::npos)
+        {
+            output.append(input, cursor, std::string::npos);
+            break;
+        }
+
+        output.append(input, cursor, texPos - cursor);
+        size_t openParen = texPos + tokenLength;
+        while (openParen < input.size() && isspace(static_cast<unsigned char>(input[openParen])))
+        {
+            ++openParen;
+        }
+        if (openParen >= input.size() || input[openParen] != '(')
+        {
+            output.append(input, texPos, tokenLength);
+            cursor = texPos + tokenLength;
+            continue;
+        }
+
+        size_t samplerPos = openParen + 1;
+        while (samplerPos < input.size() && isspace(static_cast<unsigned char>(input[samplerPos])))
+        {
+            ++samplerPos;
+        }
+
+        size_t samplerEnd = samplerPos;
+        while (samplerEnd < input.size() && IsShaderIdentifierChar(input[samplerEnd]))
+        {
+            ++samplerEnd;
+        }
+        if (samplerEnd == samplerPos)
+        {
+            output.append(input, texPos, tokenLength);
+            cursor = texPos + tokenLength;
+            continue;
+        }
+        const std::string samplerToken = input.substr(samplerPos, samplerEnd - samplerPos);
+
+        D3D12SamplerRewriteTarget target;
+        if (!TryGetD3D12BuiltinSamplerTarget(samplerToken, &target) &&
+            !TryGetD3D12DiskSamplerTarget(samplerToken, diskAliases, sharedRoots, &target))
+        {
+            output.append(input, texPos, tokenLength);
+            cursor = texPos + tokenLength;
+            continue;
+        }
+
+        size_t commaPos = samplerEnd;
+        while (commaPos < input.size() && isspace(static_cast<unsigned char>(input[commaPos])))
+        {
+            ++commaPos;
+        }
+        if (commaPos >= input.size() || input[commaPos] != ',')
+        {
+            output.append(input, texPos, tokenLength);
+            cursor = texPos + tokenLength;
+            continue;
+        }
+
+        size_t uvStart = commaPos + 1;
+        while (uvStart < input.size() && isspace(static_cast<unsigned char>(input[uvStart])))
+        {
+            ++uvStart;
+        }
+
+        int parenDepth = 1;
+        size_t closeParen = uvStart;
+        for (; closeParen < input.size(); ++closeParen)
+        {
+            if (input[closeParen] == '(')
+            {
+                ++parenDepth;
+            }
+            else if (input[closeParen] == ')')
+            {
+                --parenDepth;
+                if (parenDepth == 0)
+                {
+                    break;
+                }
+            }
+        }
+
+        if (closeParen >= input.size() || parenDepth != 0)
+        {
+            output.append(input, texPos, tokenLength);
+            cursor = texPos + tokenLength;
+            continue;
+        }
+
+        AppendD3D12TextureSample(output, target, callKind, input.substr(uvStart, closeParen - uvStart));
+        cursor = closeParen + 1;
+    }
+
+    if (output.size() + 1 < shaderTextCapacity)
+    {
+        strcpy_s(shaderText, shaderTextCapacity, output.c_str());
+    }
 }
 
 // This gets called only once, when your plugin is actually launched.
@@ -1029,7 +1833,8 @@ int CPlugin::AllocateMilkDropNonDX11()
         m_lpDX->SetTextureDirectory(textureDir);
 
         UpdatePresetList(true);
-        LoadRandomPreset(0.0f);
+        if (!LoadD3D12StartupPresetOverride(0.0f))
+            LoadRandomPreset(0.0f);
         m_bInitialPresetSelected = true;
     }
 
@@ -1777,7 +2582,8 @@ int CPlugin::AllocateMilkDropDX11()
     if (!m_bInitialPresetSelected)
     {
         UpdatePresetList(true); // ...just does its initial burst!
-        LoadRandomPreset(0.0f);
+        if (!LoadD3D12StartupPresetOverride(0.0f))
+            LoadRandomPreset(0.0f);
         m_bInitialPresetSelected = true;
     }
     else
@@ -2427,7 +3233,7 @@ static void CollectD3D12DiskSamplerAliases(const char* shaderText, std::vector<s
                 break;
             }
         }
-        if (!rootAlreadyAssigned && assignedRoots.size() >= 4)
+        if (!rootAlreadyAssigned && assignedRoots.size() >= kD3D12MaxPresetTextureLayers)
             continue;
         if (!rootAlreadyAssigned)
             assignedRoots.emplace_back(rootName);
@@ -2454,6 +3260,116 @@ static void AppendD3D12SamplerRoots(const char* shaderText, std::vector<std::wst
         if (!alreadyQueued)
             roots.emplace_back(alias.second);
     }
+}
+
+static void BuildD3D12PresetTextureRoots(const CState* pState, std::vector<std::wstring>& roots)
+{
+    roots.clear();
+    if (!pState)
+        return;
+
+    AppendD3D12SamplerRoots(pState->m_szCompShadersText, roots);
+    AppendD3D12SamplerRoots(pState->m_szWarpShadersText, roots);
+}
+
+static std::string BuildD3D12TextureRootKey(const std::vector<std::wstring>* roots)
+{
+    if (!roots || roots->empty())
+        return {};
+
+    std::string key = "|roots:";
+    for (const auto& root : *roots)
+    {
+        const AutoChar rootName(root.c_str());
+        key += rootName;
+        key += ';';
+    }
+    return key;
+}
+
+static std::string SummarizeD3D12ShaderCompilerOutput(const std::string& compilerOutput)
+{
+    std::string firstNonEmpty;
+    std::string firstWarning;
+    std::string firstError;
+    size_t pos = 0;
+    while (pos < compilerOutput.size())
+    {
+        size_t end = compilerOutput.find('\n', pos);
+        if (end == std::string::npos)
+            end = compilerOutput.size();
+
+        std::string line = compilerOutput.substr(pos, end - pos);
+        while (!line.empty() && (line.back() == '\r' || line.back() == '\n'))
+            line.pop_back();
+
+        if (!line.empty())
+        {
+            if (firstNonEmpty.empty())
+                firstNonEmpty = line;
+            if (firstWarning.empty() && (line.find(": warning ") != std::string::npos || line.find(" warning X") != std::string::npos))
+                firstWarning = line;
+            if (firstError.empty() && (line.find(": error ") != std::string::npos || line.find(" error X") != std::string::npos))
+                firstError = line;
+        }
+
+        pos = end + 1;
+    }
+
+    if (!firstError.empty())
+        return firstError;
+    if (!firstWarning.empty())
+        return firstWarning;
+    return firstNonEmpty.empty() ? compilerOutput : firstNonEmpty;
+}
+
+static bool StartsWithD3D12ShaderLine(const std::string& line, const char* prefix)
+{
+    size_t pos = 0;
+    while (pos < line.size() && isspace(static_cast<unsigned char>(line[pos])))
+        ++pos;
+    return line.compare(pos, strlen(prefix), prefix) == 0;
+}
+
+static std::string BuildD3D12ShaderIncludeText(const char* includeText)
+{
+    if (!includeText)
+        return {};
+
+    std::string input(includeText);
+    std::string output;
+    output.reserve(input.size());
+
+    size_t pos = 0;
+    while (pos < input.size())
+    {
+        size_t end = input.find('\n', pos);
+        if (end == std::string::npos)
+            end = input.size();
+
+        std::string line = input.substr(pos, end - pos);
+        while (!line.empty() && line.back() == '\r')
+            line.pop_back();
+
+        const bool skipResourceDeclaration =
+            StartsWithD3D12ShaderLine(line, "texture PrevFrameImage") ||
+            StartsWithD3D12ShaderLine(line, "sampler2D sampler_") ||
+            StartsWithD3D12ShaderLine(line, "sampler3D sampler_") ||
+            StartsWithD3D12ShaderLine(line, "float4 texsize_noise") ||
+            StartsWithD3D12ShaderLine(line, "#define sampler_FC_main") ||
+            StartsWithD3D12ShaderLine(line, "#define sampler_PC_main") ||
+            StartsWithD3D12ShaderLine(line, "#define sampler_FW_main") ||
+            StartsWithD3D12ShaderLine(line, "#define sampler_PW_main");
+        if (!skipResourceDeclaration)
+        {
+            output += line;
+            output += "\n";
+        }
+
+        pos = end + 1;
+    }
+
+    return output;
 }
 
 static bool ResolveD3D12SamplerRoot(wchar_t* rootName)
@@ -2530,7 +3446,377 @@ static bool AppendD3D12SamplerTextureFile(const wchar_t* milkdropPath, const wch
     return false;
 }
 
-static std::string BuildD3D12DiskSamplerAliasBlock(const char* shaderText)
+static bool IsD3D12PresetBackgroundTextureEnabled()
+{
+    wchar_t value[8]{};
+    const DWORD length = GetEnvironmentVariableW(L"FOO_VIS_MILK2_DX12_PRESET_BACKGROUNDS", value, static_cast<DWORD>(std::size(value)));
+    return length == 0 || wcscmp(value, L"0") != 0;
+}
+
+struct D3D12PresetBackgroundTextureCandidate
+{
+    std::wstring path;
+    ULONGLONG bytes = 0;
+    UINT width = 0;
+    UINT height = 0;
+    bool dimensionsChecked = false;
+    bool sizeCandidate = false;
+};
+
+static bool D3D12WideTextContainsAny(const wchar_t* text, const wchar_t* const* needles, size_t needleCount)
+{
+    if (!text || !*text)
+        return false;
+
+    std::wstring lowered(text);
+    for (wchar_t& ch : lowered)
+    {
+        ch = static_cast<wchar_t>(towlower(ch));
+    }
+
+    for (size_t index = 0; index < needleCount; ++index)
+    {
+        if (needles[index] && *needles[index] && lowered.find(needles[index]) != std::wstring::npos)
+            return true;
+    }
+
+    return false;
+}
+
+static bool IsD3D12PresetBackgroundTextureNameCandidate(const wchar_t* filename, ULONGLONG bytes)
+{
+    if (!filename || bytes < 128ull * 1024ull)
+        return false;
+
+    static constexpr const wchar_t* rejectedTerms[] = {
+        L"album",
+        L"akatsuki",
+        L"alchemist",
+        L"anime",
+        L"bandcamp",
+        L"bleach",
+        L"cartoon",
+        L"character",
+        L"cover",
+        L"icon",
+        L"logo",
+        L"manga",
+        L"naruto",
+        L"orig",
+        L"poster",
+        L"preview",
+        L"replacement",
+        L"screenshot",
+        L"spongebob",
+        L"sprite",
+        L"test",
+        L"thumb"
+    };
+    if (D3D12WideTextContainsAny(filename, rejectedTerms, std::size(rejectedTerms)))
+        return false;
+
+    static constexpr const wchar_t* acceptedTerms[] = {
+        L"abstract",
+        L"circle",
+        L"cloud",
+        L"color",
+        L"colour",
+        L"cube",
+        L"dark",
+        L"dust",
+        L"fire",
+        L"flame",
+        L"flower",
+        L"forest",
+        L"fractal",
+        L"galaxy",
+        L"glow",
+        L"grad",
+        L"grass",
+        L"laser",
+        L"leaf",
+        L"leaves",
+        L"light",
+        L"line",
+        L"liquid",
+        L"mandel",
+        L"marble",
+        L"matrix",
+        L"moss",
+        L"nebula",
+        L"noise",
+        L"oil",
+        L"pattern",
+        L"plasma",
+        L"pulsar",
+        L"rainbow",
+        L"render",
+        L"smoke",
+        L"space",
+        L"spectrum",
+        L"sphere",
+        L"spiral",
+        L"star",
+        L"supernova",
+        L"surface",
+        L"swirl",
+        L"texture",
+        L"tile",
+        L"tiled",
+        L"tree",
+        L"tunnel",
+        L"vortex",
+        L"water",
+        L"wave"
+    };
+    return D3D12WideTextContainsAny(filename, acceptedTerms, std::size(acceptedTerms));
+}
+
+static bool GetD3D12TextureDimensionsFromWic(const wchar_t* textureFile, UINT& width, UINT& height)
+{
+    width = 0;
+    height = 0;
+    if (!textureFile || !*textureFile)
+        return false;
+
+    bool uninitializeCom = false;
+    Microsoft::WRL::ComPtr<IWICImagingFactory> factory;
+    Microsoft::WRL::ComPtr<IWICBitmapDecoder> decoder;
+    Microsoft::WRL::ComPtr<IWICBitmapFrameDecode> frame;
+    auto cleanupCom = [&]() {
+        frame.Reset();
+        decoder.Reset();
+        factory.Reset();
+        if (uninitializeCom)
+            CoUninitialize();
+    };
+
+    HRESULT hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(factory.GetAddressOf()));
+    if (hr == CO_E_NOTINITIALIZED)
+    {
+        hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+        if (SUCCEEDED(hr))
+        {
+            uninitializeCom = true;
+            hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(factory.GetAddressOf()));
+        }
+    }
+    if (FAILED(hr) || !factory)
+    {
+        cleanupCom();
+        return false;
+    }
+
+    hr = factory->CreateDecoderFromFilename(textureFile, nullptr, GENERIC_READ, WICDecodeMetadataCacheOnDemand, decoder.GetAddressOf());
+    if (FAILED(hr))
+    {
+        cleanupCom();
+        return false;
+    }
+
+    hr = decoder->GetFrame(0, frame.GetAddressOf());
+    if (FAILED(hr))
+    {
+        cleanupCom();
+        return false;
+    }
+
+    hr = frame->GetSize(&width, &height);
+    const bool ok = SUCCEEDED(hr) && width > 0 && height > 0;
+    cleanupCom();
+    return ok;
+}
+
+static bool IsD3D12PresetBackgroundTextureSizeCandidate(ULONGLONG bytes, UINT width, UINT height)
+{
+    if (bytes < 128ull * 1024ull || width == 0 || height == 0)
+        return false;
+
+    const UINT shortEdge = std::min(width, height);
+    const uint64_t pixels = static_cast<uint64_t>(width) * static_cast<uint64_t>(height);
+    if (shortEdge < 640 || pixels < 786432ull)
+        return false;
+
+    const float aspect = static_cast<float>(width) / static_cast<float>(height);
+    return aspect >= 0.45f && aspect <= 2.45f;
+}
+
+static bool EnsureD3D12PresetBackgroundTextureCandidateReady(D3D12PresetBackgroundTextureCandidate& candidate)
+{
+    if (!candidate.dimensionsChecked)
+    {
+        candidate.dimensionsChecked = true;
+        candidate.sizeCandidate = GetD3D12TextureDimensionsFromWic(candidate.path.c_str(), candidate.width, candidate.height) &&
+                                  IsD3D12PresetBackgroundTextureSizeCandidate(candidate.bytes, candidate.width, candidate.height);
+    }
+    return candidate.sizeCandidate;
+}
+
+static uint64_t HashD3D12WideText(uint64_t hash, const wchar_t* text)
+{
+    if (!text)
+        return hash;
+
+    while (*text)
+    {
+        hash ^= static_cast<uint64_t>(towlower(*text++));
+        hash *= 1099511628211ull;
+    }
+    return hash;
+}
+
+static float ScoreD3D12PresetBackgroundTextureCandidate(const D3D12PresetBackgroundTextureCandidate& candidate, uint64_t presetHash)
+{
+    const uint64_t pixels = static_cast<uint64_t>(candidate.width) * static_cast<uint64_t>(candidate.height);
+    const UINT shortEdge = std::min(candidate.width, candidate.height);
+    const float aspect = candidate.height > 0 ? static_cast<float>(candidate.width) / static_cast<float>(candidate.height) : 1.0f;
+    const float aspectFit = 1.0f - std::min(fabsf(logf(std::max(aspect, 0.001f)) / logf(16.0f / 9.0f)), 1.0f);
+
+    float score = 0.0f;
+    score += std::min(static_cast<float>(pixels) / 2073600.0f, 1.8f) * 120.0f;
+    score += std::min(static_cast<float>(shortEdge) / 1080.0f, 1.5f) * 55.0f;
+    score += std::min(static_cast<float>(candidate.bytes) / static_cast<float>(768ull * 1024ull), 1.5f) * 35.0f;
+    score += aspectFit * 18.0f;
+
+    const uint64_t jitterHash = HashD3D12WideText(presetHash, candidate.path.c_str());
+    score += static_cast<float>(jitterHash & 0x0fffull) / 4095.0f * 7.5f;
+    return score;
+}
+
+static bool AppendD3D12PresetBackgroundTextureFile(const wchar_t* milkdropPath,
+                                                   const wchar_t* presetFile,
+                                                   const wchar_t* presetDesc,
+                                                   std::vector<std::wstring>& textureFiles,
+                                                   size_t* candidateCount = nullptr,
+                                                   UINT* selectedWidth = nullptr,
+                                                   UINT* selectedHeight = nullptr,
+                                                   ULONGLONG* selectedBytes = nullptr)
+{
+    if (candidateCount)
+        *candidateCount = 0;
+    if (selectedWidth)
+        *selectedWidth = 0;
+    if (selectedHeight)
+        *selectedHeight = 0;
+    if (selectedBytes)
+        *selectedBytes = 0;
+
+    if (!IsD3D12PresetBackgroundTextureEnabled() || !milkdropPath || !*milkdropPath)
+        return false;
+
+    static constexpr const wchar_t* masks[] = {L"*.jpg", L"*.jpeg", L"*.png", L"*.bmp", L"*.gif", L"*.jfif"};
+    static std::wstring scannedTextureDir;
+    static std::vector<D3D12PresetBackgroundTextureCandidate> cachedTextureFiles;
+
+    wchar_t textureDir[MAX_PATH]{};
+    swprintf_s(textureDir, L"%stextures\\", milkdropPath);
+    if (_wcsicmp(scannedTextureDir.c_str(), textureDir) || cachedTextureFiles.empty())
+    {
+        scannedTextureDir = textureDir;
+        cachedTextureFiles.clear();
+
+        for (const wchar_t* mask : masks)
+        {
+            WIN32_FIND_DATAW findData{};
+            wchar_t query[MAX_PATH]{};
+            swprintf_s(query, L"%s%s", textureDir, mask);
+            HANDLE find = FindFirstFileW(query, &findData);
+            if (find == INVALID_HANDLE_VALUE)
+                continue;
+
+            do
+            {
+                if (findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+                    continue;
+
+                const ULONGLONG bytes = (static_cast<ULONGLONG>(findData.nFileSizeHigh) << 32) |
+                                         static_cast<ULONGLONG>(findData.nFileSizeLow);
+                if (!IsD3D12PresetBackgroundTextureNameCandidate(findData.cFileName, bytes))
+                    continue;
+
+                D3D12PresetBackgroundTextureCandidate candidate;
+                candidate.path = std::wstring(textureDir) + findData.cFileName;
+                candidate.bytes = bytes;
+                cachedTextureFiles.emplace_back(candidate);
+            } while (FindNextFileW(find, &findData));
+
+            FindClose(find);
+        }
+
+        std::sort(cachedTextureFiles.begin(), cachedTextureFiles.end(), [](const auto& lhs, const auto& rhs) {
+            return _wcsicmp(lhs.path.c_str(), rhs.path.c_str()) < 0;
+        });
+    }
+
+    if (cachedTextureFiles.empty())
+        return false;
+
+    if (candidateCount)
+        *candidateCount = cachedTextureFiles.size();
+
+    uint64_t hash = 1469598103934665603ull;
+    hash = HashD3D12WideText(hash, presetFile);
+    hash = HashD3D12WideText(hash, presetDesc);
+    const size_t firstIndex = static_cast<size_t>(hash % cachedTextureFiles.size());
+    D3D12PresetBackgroundTextureCandidate* selected = nullptr;
+    std::vector<std::pair<float, D3D12PresetBackgroundTextureCandidate*>> scoredCandidates;
+    scoredCandidates.reserve(128);
+    auto considerCandidate = [&](D3D12PresetBackgroundTextureCandidate& candidate) {
+        if (!EnsureD3D12PresetBackgroundTextureCandidateReady(candidate))
+            return;
+
+        const float score = ScoreD3D12PresetBackgroundTextureCandidate(candidate, hash);
+        scoredCandidates.emplace_back(score, &candidate);
+    };
+
+    const size_t qualityWindow = std::min<size_t>(cachedTextureFiles.size(), 128);
+    for (size_t attempt = 0; attempt < qualityWindow; ++attempt)
+    {
+        considerCandidate(cachedTextureFiles[(firstIndex + attempt) % cachedTextureFiles.size()]);
+    }
+    if (!scoredCandidates.empty())
+    {
+        std::sort(scoredCandidates.begin(), scoredCandidates.end(), [](const auto& lhs, const auto& rhs) {
+            return lhs.first > rhs.first;
+        });
+        const float bestScore = scoredCandidates.front().first;
+        size_t topCount = 0;
+        while (topCount < scoredCandidates.size() && topCount < 12 && scoredCandidates[topCount].first >= bestScore - 28.0f)
+        {
+            ++topCount;
+        }
+        topCount = std::max<size_t>(topCount, 1);
+        selected = scoredCandidates[static_cast<size_t>((hash >> 17) % topCount)].second;
+    }
+    if (!selected)
+    {
+        for (size_t attempt = qualityWindow; attempt < cachedTextureFiles.size(); ++attempt)
+        {
+            D3D12PresetBackgroundTextureCandidate& candidate = cachedTextureFiles[(firstIndex + attempt) % cachedTextureFiles.size()];
+            if (EnsureD3D12PresetBackgroundTextureCandidateReady(candidate))
+            {
+                selected = &candidate;
+                break;
+            }
+        }
+    }
+
+    if (!selected)
+    {
+        return false;
+    }
+
+    textureFiles.emplace_back(selected->path);
+    if (selectedWidth)
+        *selectedWidth = selected->width;
+    if (selectedHeight)
+        *selectedHeight = selected->height;
+    if (selectedBytes)
+        *selectedBytes = selected->bytes;
+    return true;
+}
+
+static std::string BuildD3D12DiskSamplerAliasBlock(const char* shaderText, const std::vector<std::wstring>* sharedRoots = nullptr)
 {
     std::vector<std::pair<std::string, std::wstring>> aliases;
     CollectD3D12DiskSamplerAliases(shaderText, aliases);
@@ -2538,39 +3824,99 @@ static std::string BuildD3D12DiskSamplerAliasBlock(const char* shaderText)
         return {};
 
     std::vector<std::wstring> roots;
+    std::set<std::string> texsizeAliases;
+    std::set<size_t> declaredLayers;
     std::string block = "\n// DX12 disk sampler aliases.\n";
     for (const auto& alias : aliases)
     {
         size_t layer = 0;
         bool foundLayer = false;
-        for (; layer < roots.size(); ++layer)
+        const std::vector<std::wstring>& searchRoots = sharedRoots ? *sharedRoots : roots;
+        for (; layer < searchRoots.size(); ++layer)
         {
-            if (!_wcsicmp(roots[layer].c_str(), alias.second.c_str()))
+            if (!_wcsicmp(searchRoots[layer].c_str(), alias.second.c_str()))
             {
                 foundLayer = true;
                 break;
             }
         }
+        if (sharedRoots && !foundLayer)
+        {
+            continue;
+        }
         if (!foundLayer)
         {
-            if (roots.size() >= 4)
+            if (roots.size() >= kD3D12MaxPresetTextureLayers)
                 continue;
             roots.emplace_back(alias.second);
             layer = roots.size() - 1;
-            char declaration[256]{};
+            char declaration[512]{};
             sprintf_s(declaration,
                       "texture d3d12_layer%zu : register(t%zu);\n"
+                      "Texture2D<float4> d3d12_layer%zu_tex : register(t%zu);\n"
                       "sampler2D sampler_d3d12_layer%zu = sampler_state { Texture = <d3d12_layer%zu>; };\n",
+                      layer,
+                      layer + 1,
                       layer,
                       layer + 1,
                       layer,
                       layer);
             block += declaration;
         }
+        else if (sharedRoots)
+        {
+            if (layer >= kD3D12MaxPresetTextureLayers)
+                continue;
 
-        char defineLine[256]{};
-        sprintf_s(defineLine, "#define sampler_%s sampler_d3d12_layer%zu\n", alias.first.c_str(), layer);
+            if (declaredLayers.insert(layer).second)
+            {
+                char declaration[512]{};
+                sprintf_s(declaration,
+                          "texture d3d12_layer%zu : register(t%zu);\n"
+                          "Texture2D<float4> d3d12_layer%zu_tex : register(t%zu);\n"
+                          "sampler2D sampler_d3d12_layer%zu = sampler_state { Texture = <d3d12_layer%zu>; };\n",
+                          layer,
+                          layer + 1,
+                          layer,
+                          layer + 1,
+                          layer,
+                          layer);
+                block += declaration;
+            }
+        }
+
+        char defineLine[512]{};
+        sprintf_s(defineLine,
+                  "#undef sampler_%s\n"
+                  "#define sampler_%s sampler_d3d12_layer%zu\n",
+                  alias.first.c_str(),
+                  alias.first.c_str(),
+                  layer);
         block += defineLine;
+
+        if (texsizeAliases.insert(alias.first).second)
+        {
+            char texsizeLine[512]{};
+            sprintf_s(texsizeLine,
+                      "#undef texsize_%s\n"
+                      "#define texsize_%s texsize\n",
+                      alias.first.c_str(),
+                      alias.first.c_str());
+            block += texsizeLine;
+        }
+
+        const AutoChar rootNameA(alias.second.c_str());
+        std::string rootName(rootNameA);
+        if (!rootName.empty() && texsizeAliases.insert(rootName).second)
+        {
+            char texsizeLine[512]{};
+            sprintf_s(texsizeLine,
+                      "#undef texsize_%s\n"
+                      "#define texsize_%s texsize\n",
+                      rootName.c_str(),
+                      rootName.c_str());
+            block += texsizeLine;
+        }
     }
     block += "\n";
     return block;
@@ -2582,8 +3928,7 @@ bool CPlugin::SelectD3D12PresetTexture()
         return false;
 
     std::vector<std::wstring> roots;
-    AppendD3D12SamplerRoots(m_pState->m_szCompShadersText, roots);
-    AppendD3D12SamplerRoots(m_pState->m_szWarpShadersText, roots);
+    BuildD3D12PresetTextureRoots(m_pState, roots);
     std::vector<std::wstring> textureFiles;
     for (const auto& root : roots)
     {
@@ -2593,13 +3938,34 @@ bool CPlugin::SelectD3D12PresetTexture()
             continue;
 
         AppendD3D12SamplerTextureFile(m_szMilkdrop2Path, m_szPresetDir, rootName, textureFiles);
-        if (textureFiles.size() >= 4)
+        if (textureFiles.size() >= kD3D12MaxPresetTextureLayers)
             break;
     }
 
+    size_t backgroundCandidateCount = 0;
+    UINT backgroundWidth = 0;
+    UINT backgroundHeight = 0;
+    ULONGLONG backgroundBytes = 0;
+    const bool usePresetBackgroundTexture = textureFiles.empty() && roots.empty() &&
+                                            AppendD3D12PresetBackgroundTextureFile(m_szMilkdrop2Path,
+                                                                                  m_szCurrentPresetFile,
+                                                                                  m_pState ? m_pState->m_szDesc : L"",
+                                                                                  textureFiles,
+                                                                                  &backgroundCandidateCount,
+                                                                                  &backgroundWidth,
+                                                                                  &backgroundHeight,
+                                                                                  &backgroundBytes);
+
     if (textureFiles.empty())
     {
-        m_lpDX->ClearPresetTextureOverride();
+        wchar_t logLine[512]{};
+        swprintf_s(logLine,
+                   L"preset texture roots=%zu files=0 mode=none bg_candidates=%zu preset=\"%ls\"",
+                   roots.size(),
+                   backgroundCandidateCount,
+                   m_pState && m_pState->m_szDesc[0] ? m_pState->m_szDesc : L"");
+        WriteD3D12PluginLogLine(logLine);
+        m_lpDX->ClearTextureFiles();
         return false;
     }
 
@@ -2609,7 +3975,28 @@ bool CPlugin::SelectD3D12PresetTexture()
     {
         textureFilePtrs.push_back(textureFile.c_str());
     }
-    return m_lpDX->SetPresetTextureFiles(textureFilePtrs.data(), textureFilePtrs.size());
+    const bool loaded = usePresetBackgroundTexture ?
+        m_lpDX->SetTextureFiles(textureFilePtrs.data(), textureFilePtrs.size()) :
+        m_lpDX->SetPresetTextureFiles(textureFilePtrs.data(), textureFilePtrs.size());
+    if (!loaded)
+    {
+        m_lpDX->ClearTextureFiles();
+    }
+    wchar_t logLine[1024]{};
+    swprintf_s(logLine,
+               L"preset texture roots=%zu files=%zu loaded=%d mode=%ls bg_candidates=%zu bg_size=%ux%u bg_kb=%llu first=\"%ls\" preset=\"%ls\"",
+               roots.size(),
+               textureFiles.size(),
+               loaded ? 1 : 0,
+               usePresetBackgroundTexture ? L"background" : L"shader",
+               backgroundCandidateCount,
+               backgroundWidth,
+               backgroundHeight,
+               static_cast<unsigned long long>(backgroundBytes / 1024ull),
+               textureFiles.empty() ? L"" : textureFiles[0].c_str(),
+               m_pState && m_pState->m_szDesc[0] ? m_pState->m_szDesc : L"");
+    WriteD3D12PluginLogLine(logLine);
+    return loaded;
 }
 
 void CShaderParams::CacheParams(CConstantTable* pCT, bool /* bHardErrors */)
@@ -3149,7 +4536,7 @@ bool CPlugin::CompileD3D12PresetShaderProbe(const char* szOrigShaderText, int sh
     if (!szOrigShaderText || !*szOrigShaderText)
         return true;
 
-    const std::string cacheKey = std::to_string(shaderType) + ":" + szOrigShaderText;
+    const std::string cacheKey = std::to_string(shaderType) + ":" + kD3D12PresetShaderCacheVersion + ":dxinclude1:" + szOrigShaderText;
     if (m_d3d12PresetShaderCompileOk.find(cacheKey) != m_d3d12PresetShaderCompileOk.end())
         return true;
     if (m_d3d12PresetShaderCompileFailed.find(cacheKey) != m_d3d12PresetShaderCompileFailed.end())
@@ -3166,12 +4553,13 @@ bool CPlugin::CompileD3D12PresetShaderProbe(const char* szOrigShaderText, int sh
     return false;
 }
 
-bool CPlugin::BuildD3D12PresetShaderBytecode(const char* szOrigShaderText, int shaderType, std::vector<uint8_t>* bytecode, std::string* errors)
+bool CPlugin::BuildD3D12PresetShaderBytecode(const char* szOrigShaderText, int shaderType, std::vector<uint8_t>* bytecode, std::string* errors, const std::vector<std::wstring>* textureRoots)
 {
     if (!szOrigShaderText || !*szOrigShaderText)
         return false;
 
-    const std::string cacheKey = std::to_string(shaderType) + ":" + szOrigShaderText;
+    const std::string rootKey = BuildD3D12TextureRootKey(textureRoots);
+    const std::string cacheKey = std::to_string(shaderType) + ":" + kD3D12PresetShaderCacheVersion + ":dxinclude1:" + rootKey + ":" + szOrigShaderText;
     if (bytecode)
     {
         const auto cached = m_d3d12PresetShaderBytecodeCache.find(cacheKey);
@@ -3192,8 +4580,8 @@ bool CPlugin::BuildD3D12PresetShaderBytecode(const char* szOrigShaderText, int s
                                  "#define uv _uv.xy\n"
                                  "#define uv_orig _uv.xy\n"
                                  "#define hue_shader _vDiffuse.xyz\n";
-    const char szWarpParams[]  = "float4 _vDiffuse : COLOR, float4 _uv : TEXCOORD0, float2 _rad_ang : TEXCOORD1, out float4 _return_value : COLOR0";
-    const char szCompParams[]  = "float4 _vDiffuse : COLOR, float2 _uv : TEXCOORD0, float2 _rad_ang : TEXCOORD1, out float4 _return_value : COLOR0";
+    const char szWarpParams[]  = "float4 _position : SV_POSITION, float4 _uv : TEXCOORD0, float4 _vDiffuse : COLOR, float2 _rad_ang : TEXCOORD1, out float4 _return_value : SV_TARGET";
+    const char szCompParams[]  = "float4 _position : SV_POSITION, float2 _uv : TEXCOORD0, float2 _rad_ang : TEXCOORD1, float4 _vDiffuse : COLOR, out float4 _return_value : SV_TARGET";
     const char szFirstLine[]   = "    float3 ret = 0;";
     const char szLastLine[]    = "    _return_value = float4(ret.xyz, _vDiffuse.w);";
     // clang-format on
@@ -3202,25 +4590,332 @@ bool CPlugin::BuildD3D12PresetShaderBytecode(const char* szOrigShaderText, int s
     char temp[128000]{};
     size_t writePos = 0;
 
-    strcpy_s(&szShaderText[writePos], ARRAYSIZE(szShaderText), m_szShaderIncludeText);
-    writePos += m_nShaderIncludeTextLen;
+    const std::string dx12IncludeText = BuildD3D12ShaderIncludeText(m_szShaderIncludeText);
+    strcpy_s(&szShaderText[writePos], ARRAYSIZE(szShaderText), dx12IncludeText.c_str());
+    writePos += dx12IncludeText.size();
 
+    static_assert(DX::D3D12Resources::MaxPresetTextureLayers() == 16, "Update DX12 preset shader texture register aliases.");
+    static_assert(DX::D3D12Resources::NoiseTextureSrvStart() == 17, "Update DX12 preset shader noise register aliases.");
+    static_assert(DX::D3D12Resources::NoiseVolumeTextureSrvStart() == 21, "Update DX12 preset shader noise volume register aliases.");
+    static_assert(DX::D3D12Resources::BlurTextureSrvStart() == 23, "Update DX12 preset shader blur register aliases.");
+    static_assert(DX::D3D12Resources::ShaderSrvCount() == 26, "Update DX12 preset shader sampler register aliases.");
+    static_assert(DX::D3D12Resources::ShaderLinearWrapSampler() == 0, "Update DX12 preset shader sampler aliases.");
+    static_assert(DX::D3D12Resources::ShaderLinearClampSampler() == 1, "Update DX12 preset shader sampler aliases.");
+    static_assert(DX::D3D12Resources::ShaderPointWrapSampler() == 2, "Update DX12 preset shader sampler aliases.");
+    static_assert(DX::D3D12Resources::ShaderPointClampSampler() == 3, "Update DX12 preset shader sampler aliases.");
     static constexpr const char szD3D12SamplerAliases[] =
+        "#undef sampler_FC_main\n"
+        "#undef sampler_PC_main\n"
+        "#undef sampler_FW_main\n"
+        "#undef sampler_PW_main\n"
         "#define sampler_fc_main sampler_main\n"
         "#define sampler_pc_main sampler_main\n"
         "#define sampler_fw_main sampler_main\n"
         "#define sampler_pw_main sampler_main\n"
+        "#define sampler_wf_main sampler_main\n"
+        "#define sampler_cf_main sampler_main\n"
+        "#define sampler_wp_main sampler_main\n"
+        "#define sampler_cp_main sampler_main\n"
         "#define sampler_FC_main sampler_main\n"
         "#define sampler_PC_main sampler_main\n"
         "#define sampler_FW_main sampler_main\n"
         "#define sampler_PW_main sampler_main\n"
+        "#define sampler_WF_main sampler_main\n"
+        "#define sampler_CF_main sampler_main\n"
+        "#define sampler_WP_main sampler_main\n"
+        "#define sampler_CP_main sampler_main\n"
         "#define sampler_blur1 sampler_main\n"
         "#define sampler_blur2 sampler_main\n"
         "#define sampler_blur3 sampler_main\n"
-        "#define sampler_noise_lq sampler_main\n"
-        "#define sampler_noise_lq_lite sampler_main\n"
-        "#define sampler_noise_mq sampler_main\n"
-        "#define sampler_noise_hq sampler_main\n";
+        "Texture2D<float4> d3d12_source_tex : register(t0);\n"
+        "texture d3d12_noise_lq : register(t17);\n"
+        "texture d3d12_noise_lq_lite : register(t18);\n"
+        "texture d3d12_noise_mq : register(t19);\n"
+        "texture d3d12_noise_hq : register(t20);\n"
+        "Texture2D<float4> d3d12_noise_lq_tex : register(t17);\n"
+        "Texture2D<float4> d3d12_noise_lq_lite_tex : register(t18);\n"
+        "Texture2D<float4> d3d12_noise_mq_tex : register(t19);\n"
+        "Texture2D<float4> d3d12_noise_hq_tex : register(t20);\n"
+        "Texture3D<float4> d3d12_noisevol_lq : register(t21);\n"
+        "Texture3D<float4> d3d12_noisevol_hq : register(t22);\n"
+        "Texture2D<float4> d3d12_blur1 : register(t23);\n"
+        "Texture2D<float4> d3d12_blur2 : register(t24);\n"
+        "Texture2D<float4> d3d12_blur3 : register(t25);\n"
+        "SamplerState sampler_d3d12_linear_wrap : register(s0);\n"
+        "SamplerState sampler_d3d12_linear_clamp : register(s1);\n"
+        "SamplerState sampler_d3d12_point_wrap : register(s2);\n"
+        "SamplerState sampler_d3d12_point_clamp : register(s3);\n"
+        "float2 D3D12TexCoord2(float v) { return float2(v, v); }\n"
+        "float2 D3D12TexCoord2(float2 v) { return v; }\n"
+        "float2 D3D12TexCoord2(float3 v) { return v.xy; }\n"
+        "float2 D3D12TexCoord2(float4 v) { return v.xy; }\n"
+        "float3 D3D12TexCoord3(float v) { return float3(v, v, v); }\n"
+        "float3 D3D12TexCoord3(float2 v) { return float3(v.xy, 0.0); }\n"
+        "float3 D3D12TexCoord3(float3 v) { return v; }\n"
+        "float3 D3D12TexCoord3(float4 v) { return v.xyz; }\n"
+        "float D3D12TexCoordW(float v) { return 0.0; }\n"
+        "float D3D12TexCoordW(float2 v) { return 0.0; }\n"
+        "float D3D12TexCoordW(float3 v) { return 0.0; }\n"
+        "float D3D12TexCoordW(float4 v) { return v.w; }\n"
+        "#define sampler_d3d12_noise2d sampler_d3d12_linear_wrap\n"
+        "#define sampler_d3d12_noisevol sampler_d3d12_linear_wrap\n"
+        "#define sampler_d3d12_blur sampler_d3d12_linear_clamp\n"
+        "sampler2D sampler_d3d12_noise_lq = sampler_state { Texture = <d3d12_noise_lq>; };\n"
+        "sampler2D sampler_d3d12_noise_lq_lite = sampler_state { Texture = <d3d12_noise_lq_lite>; };\n"
+        "sampler2D sampler_d3d12_noise_mq = sampler_state { Texture = <d3d12_noise_mq>; };\n"
+        "sampler2D sampler_d3d12_noise_hq = sampler_state { Texture = <d3d12_noise_hq>; };\n"
+        "#define sampler_d3d12_noisevol_lq d3d12_noisevol_lq\n"
+        "#define sampler_d3d12_noisevol_hq d3d12_noisevol_hq\n"
+        "#undef tex3D\n"
+        "#undef tex3d\n"
+        "#undef tex3Dbias\n"
+        "#undef tex3dbias\n"
+        "#undef tex3Dlod\n"
+        "#undef tex3dlod\n"
+        "#define tex3D(s,u) (s.Sample(sampler_d3d12_noisevol, D3D12TexCoord3(u)))\n"
+        "#define tex3d(s,u) tex3D(s,u)\n"
+        "#define tex3Dbias(s,u) (s.SampleBias(sampler_d3d12_noisevol, D3D12TexCoord3(u), D3D12TexCoordW(u)))\n"
+        "#define tex3dbias(s,u) tex3Dbias(s,u)\n"
+        "#define tex3Dlod(s,u) (s.SampleLevel(sampler_d3d12_noisevol, D3D12TexCoord3(u), D3D12TexCoordW(u)))\n"
+        "#define tex3dlod(s,u) tex3Dlod(s,u)\n"
+        "#define sampler_noise_lq sampler_d3d12_noise_lq\n"
+        "#define sampler_noise_lq_lite sampler_d3d12_noise_lq_lite\n"
+        "#define sampler_noise_mq sampler_d3d12_noise_mq\n"
+        "#define sampler_noise_hq sampler_d3d12_noise_hq\n"
+        "#define sampler_noisevol_lq sampler_d3d12_noisevol_lq\n"
+        "#define sampler_noisevol_hq sampler_d3d12_noisevol_hq\n"
+        "#define sampler_fw_noise_lq sampler_d3d12_noise_lq\n"
+        "#define sampler_fc_noise_lq sampler_d3d12_noise_lq\n"
+        "#define sampler_pw_noise_lq sampler_d3d12_noise_lq\n"
+        "#define sampler_pc_noise_lq sampler_d3d12_noise_lq\n"
+        "#define sampler_fw_noise_lq_lite sampler_d3d12_noise_lq_lite\n"
+        "#define sampler_fc_noise_lq_lite sampler_d3d12_noise_lq_lite\n"
+        "#define sampler_pw_noise_lq_lite sampler_d3d12_noise_lq_lite\n"
+        "#define sampler_pc_noise_lq_lite sampler_d3d12_noise_lq_lite\n"
+        "#define sampler_fw_noise_mq sampler_d3d12_noise_mq\n"
+        "#define sampler_fc_noise_mq sampler_d3d12_noise_mq\n"
+        "#define sampler_pw_noise_mq sampler_d3d12_noise_mq\n"
+        "#define sampler_pc_noise_mq sampler_d3d12_noise_mq\n"
+        "#define sampler_fw_noise_hq sampler_d3d12_noise_hq\n"
+        "#define sampler_fc_noise_hq sampler_d3d12_noise_hq\n"
+        "#define sampler_pw_noise_hq sampler_d3d12_noise_hq\n"
+        "#define sampler_pc_noise_hq sampler_d3d12_noise_hq\n"
+        "#define sampler_wf_noise_lq sampler_d3d12_noise_lq\n"
+        "#define sampler_cf_noise_lq sampler_d3d12_noise_lq\n"
+        "#define sampler_wp_noise_lq sampler_d3d12_noise_lq\n"
+        "#define sampler_cp_noise_lq sampler_d3d12_noise_lq\n"
+        "#define sampler_wf_noise_lq_lite sampler_d3d12_noise_lq_lite\n"
+        "#define sampler_cf_noise_lq_lite sampler_d3d12_noise_lq_lite\n"
+        "#define sampler_wp_noise_lq_lite sampler_d3d12_noise_lq_lite\n"
+        "#define sampler_cp_noise_lq_lite sampler_d3d12_noise_lq_lite\n"
+        "#define sampler_wf_noise_mq sampler_d3d12_noise_mq\n"
+        "#define sampler_cf_noise_mq sampler_d3d12_noise_mq\n"
+        "#define sampler_wp_noise_mq sampler_d3d12_noise_mq\n"
+        "#define sampler_cp_noise_mq sampler_d3d12_noise_mq\n"
+        "#define sampler_wf_noise_hq sampler_d3d12_noise_hq\n"
+        "#define sampler_cf_noise_hq sampler_d3d12_noise_hq\n"
+        "#define sampler_wp_noise_hq sampler_d3d12_noise_hq\n"
+        "#define sampler_cp_noise_hq sampler_d3d12_noise_hq\n"
+        "#define sampler_FW_noise_lq sampler_d3d12_noise_lq\n"
+        "#define sampler_FC_noise_lq sampler_d3d12_noise_lq\n"
+        "#define sampler_PW_noise_lq sampler_d3d12_noise_lq\n"
+        "#define sampler_PC_noise_lq sampler_d3d12_noise_lq\n"
+        "#define sampler_WF_noise_lq sampler_d3d12_noise_lq\n"
+        "#define sampler_CF_noise_lq sampler_d3d12_noise_lq\n"
+        "#define sampler_WP_noise_lq sampler_d3d12_noise_lq\n"
+        "#define sampler_CP_noise_lq sampler_d3d12_noise_lq\n"
+        "#define sampler_FW_noise_lq_lite sampler_d3d12_noise_lq_lite\n"
+        "#define sampler_FC_noise_lq_lite sampler_d3d12_noise_lq_lite\n"
+        "#define sampler_PW_noise_lq_lite sampler_d3d12_noise_lq_lite\n"
+        "#define sampler_PC_noise_lq_lite sampler_d3d12_noise_lq_lite\n"
+        "#define sampler_WF_noise_lq_lite sampler_d3d12_noise_lq_lite\n"
+        "#define sampler_CF_noise_lq_lite sampler_d3d12_noise_lq_lite\n"
+        "#define sampler_WP_noise_lq_lite sampler_d3d12_noise_lq_lite\n"
+        "#define sampler_CP_noise_lq_lite sampler_d3d12_noise_lq_lite\n"
+        "#define sampler_FW_noise_mq sampler_d3d12_noise_mq\n"
+        "#define sampler_FC_noise_mq sampler_d3d12_noise_mq\n"
+        "#define sampler_PW_noise_mq sampler_d3d12_noise_mq\n"
+        "#define sampler_PC_noise_mq sampler_d3d12_noise_mq\n"
+        "#define sampler_WF_noise_mq sampler_d3d12_noise_mq\n"
+        "#define sampler_CF_noise_mq sampler_d3d12_noise_mq\n"
+        "#define sampler_WP_noise_mq sampler_d3d12_noise_mq\n"
+        "#define sampler_CP_noise_mq sampler_d3d12_noise_mq\n"
+        "#define sampler_FW_noise_hq sampler_d3d12_noise_hq\n"
+        "#define sampler_FC_noise_hq sampler_d3d12_noise_hq\n"
+        "#define sampler_PW_noise_hq sampler_d3d12_noise_hq\n"
+        "#define sampler_PC_noise_hq sampler_d3d12_noise_hq\n"
+        "#define sampler_WF_noise_hq sampler_d3d12_noise_hq\n"
+        "#define sampler_CF_noise_hq sampler_d3d12_noise_hq\n"
+        "#define sampler_WP_noise_hq sampler_d3d12_noise_hq\n"
+        "#define sampler_CP_noise_hq sampler_d3d12_noise_hq\n"
+        "#define sampler_fw_noisevol_lq sampler_d3d12_noisevol_lq\n"
+        "#define sampler_fc_noisevol_lq sampler_d3d12_noisevol_lq\n"
+        "#define sampler_pw_noisevol_lq sampler_d3d12_noisevol_lq\n"
+        "#define sampler_pc_noisevol_lq sampler_d3d12_noisevol_lq\n"
+        "#define sampler_fw_noisevol_hq sampler_d3d12_noisevol_hq\n"
+        "#define sampler_fc_noisevol_hq sampler_d3d12_noisevol_hq\n"
+        "#define sampler_pw_noisevol_hq sampler_d3d12_noisevol_hq\n"
+        "#define sampler_pc_noisevol_hq sampler_d3d12_noisevol_hq\n"
+        "#define sampler_wf_noisevol_lq sampler_d3d12_noisevol_lq\n"
+        "#define sampler_cf_noisevol_lq sampler_d3d12_noisevol_lq\n"
+        "#define sampler_wp_noisevol_lq sampler_d3d12_noisevol_lq\n"
+        "#define sampler_cp_noisevol_lq sampler_d3d12_noisevol_lq\n"
+        "#define sampler_wf_noisevol_hq sampler_d3d12_noisevol_hq\n"
+        "#define sampler_cf_noisevol_hq sampler_d3d12_noisevol_hq\n"
+        "#define sampler_wp_noisevol_hq sampler_d3d12_noisevol_hq\n"
+        "#define sampler_cp_noisevol_hq sampler_d3d12_noisevol_hq\n"
+        "#define sampler_FW_noisevol_lq sampler_d3d12_noisevol_lq\n"
+        "#define sampler_FC_noisevol_lq sampler_d3d12_noisevol_lq\n"
+        "#define sampler_PW_noisevol_lq sampler_d3d12_noisevol_lq\n"
+        "#define sampler_PC_noisevol_lq sampler_d3d12_noisevol_lq\n"
+        "#define sampler_WF_noisevol_lq sampler_d3d12_noisevol_lq\n"
+        "#define sampler_CF_noisevol_lq sampler_d3d12_noisevol_lq\n"
+        "#define sampler_WP_noisevol_lq sampler_d3d12_noisevol_lq\n"
+        "#define sampler_CP_noisevol_lq sampler_d3d12_noisevol_lq\n"
+        "#define sampler_FW_noisevol_hq sampler_d3d12_noisevol_hq\n"
+        "#define sampler_FC_noisevol_hq sampler_d3d12_noisevol_hq\n"
+        "#define sampler_PW_noisevol_hq sampler_d3d12_noisevol_hq\n"
+        "#define sampler_PC_noisevol_hq sampler_d3d12_noisevol_hq\n"
+        "#define sampler_WF_noisevol_hq sampler_d3d12_noisevol_hq\n"
+        "#define sampler_CF_noisevol_hq sampler_d3d12_noisevol_hq\n"
+        "#define sampler_WP_noisevol_hq sampler_d3d12_noisevol_hq\n"
+        "#define sampler_CP_noisevol_hq sampler_d3d12_noisevol_hq\n"
+        "#define texsize_main texsize\n"
+        "#define texsize_fc_main texsize\n"
+        "#define texsize_pc_main texsize\n"
+        "#define texsize_fw_main texsize\n"
+        "#define texsize_pw_main texsize\n"
+        "#define texsize_wf_main texsize\n"
+        "#define texsize_cf_main texsize\n"
+        "#define texsize_wp_main texsize\n"
+        "#define texsize_cp_main texsize\n"
+        "#define texsize_FC_main texsize\n"
+        "#define texsize_PC_main texsize\n"
+        "#define texsize_FW_main texsize\n"
+        "#define texsize_PW_main texsize\n"
+        "#define texsize_WF_main texsize\n"
+        "#define texsize_CF_main texsize\n"
+        "#define texsize_WP_main texsize\n"
+        "#define texsize_CP_main texsize\n"
+        "#define texsize_blur1 float4(texsize.x * 0.25, texsize.y * 0.25, texsize.z * 4.0, texsize.w * 4.0)\n"
+        "#define texsize_blur2 float4(texsize.x * 0.125, texsize.y * 0.125, texsize.z * 8.0, texsize.w * 8.0)\n"
+        "#define texsize_blur3 float4(texsize.x * 0.0625, texsize.y * 0.0625, texsize.z * 16.0, texsize.w * 16.0)\n"
+        "#define texsize_noise_lq float4(256.0,256.0,0.00390625,0.00390625)\n"
+        "#define texsize_noise_lq_lite float4(32.0,32.0,0.03125,0.03125)\n"
+        "#define texsize_noise_mq float4(256.0,256.0,0.00390625,0.00390625)\n"
+        "#define texsize_noise_hq float4(256.0,256.0,0.00390625,0.00390625)\n"
+        "#define texsize_fw_noise_lq texsize_noise_lq\n"
+        "#define texsize_fc_noise_lq texsize_noise_lq\n"
+        "#define texsize_pw_noise_lq texsize_noise_lq\n"
+        "#define texsize_pc_noise_lq texsize_noise_lq\n"
+        "#define texsize_fw_noise_lq_lite texsize_noise_lq_lite\n"
+        "#define texsize_fc_noise_lq_lite texsize_noise_lq_lite\n"
+        "#define texsize_pw_noise_lq_lite texsize_noise_lq_lite\n"
+        "#define texsize_pc_noise_lq_lite texsize_noise_lq_lite\n"
+        "#define texsize_fw_noise_mq texsize_noise_mq\n"
+        "#define texsize_fc_noise_mq texsize_noise_mq\n"
+        "#define texsize_pw_noise_mq texsize_noise_mq\n"
+        "#define texsize_pc_noise_mq texsize_noise_mq\n"
+        "#define texsize_fw_noise_hq texsize_noise_hq\n"
+        "#define texsize_fc_noise_hq texsize_noise_hq\n"
+        "#define texsize_pw_noise_hq texsize_noise_hq\n"
+        "#define texsize_pc_noise_hq texsize_noise_hq\n"
+        "#define texsize_wf_noise_lq texsize_noise_lq\n"
+        "#define texsize_cf_noise_lq texsize_noise_lq\n"
+        "#define texsize_wp_noise_lq texsize_noise_lq\n"
+        "#define texsize_cp_noise_lq texsize_noise_lq\n"
+        "#define texsize_wf_noise_lq_lite texsize_noise_lq_lite\n"
+        "#define texsize_cf_noise_lq_lite texsize_noise_lq_lite\n"
+        "#define texsize_wp_noise_lq_lite texsize_noise_lq_lite\n"
+        "#define texsize_cp_noise_lq_lite texsize_noise_lq_lite\n"
+        "#define texsize_wf_noise_mq texsize_noise_mq\n"
+        "#define texsize_cf_noise_mq texsize_noise_mq\n"
+        "#define texsize_wp_noise_mq texsize_noise_mq\n"
+        "#define texsize_cp_noise_mq texsize_noise_mq\n"
+        "#define texsize_wf_noise_hq texsize_noise_hq\n"
+        "#define texsize_cf_noise_hq texsize_noise_hq\n"
+        "#define texsize_wp_noise_hq texsize_noise_hq\n"
+        "#define texsize_cp_noise_hq texsize_noise_hq\n"
+        "#define texsize_FW_noise_lq texsize_noise_lq\n"
+        "#define texsize_FC_noise_lq texsize_noise_lq\n"
+        "#define texsize_PW_noise_lq texsize_noise_lq\n"
+        "#define texsize_PC_noise_lq texsize_noise_lq\n"
+        "#define texsize_WF_noise_lq texsize_noise_lq\n"
+        "#define texsize_CF_noise_lq texsize_noise_lq\n"
+        "#define texsize_WP_noise_lq texsize_noise_lq\n"
+        "#define texsize_CP_noise_lq texsize_noise_lq\n"
+        "#define texsize_FW_noise_lq_lite texsize_noise_lq_lite\n"
+        "#define texsize_FC_noise_lq_lite texsize_noise_lq_lite\n"
+        "#define texsize_PW_noise_lq_lite texsize_noise_lq_lite\n"
+        "#define texsize_PC_noise_lq_lite texsize_noise_lq_lite\n"
+        "#define texsize_WF_noise_lq_lite texsize_noise_lq_lite\n"
+        "#define texsize_CF_noise_lq_lite texsize_noise_lq_lite\n"
+        "#define texsize_WP_noise_lq_lite texsize_noise_lq_lite\n"
+        "#define texsize_CP_noise_lq_lite texsize_noise_lq_lite\n"
+        "#define texsize_FW_noise_mq texsize_noise_mq\n"
+        "#define texsize_FC_noise_mq texsize_noise_mq\n"
+        "#define texsize_PW_noise_mq texsize_noise_mq\n"
+        "#define texsize_PC_noise_mq texsize_noise_mq\n"
+        "#define texsize_WF_noise_mq texsize_noise_mq\n"
+        "#define texsize_CF_noise_mq texsize_noise_mq\n"
+        "#define texsize_WP_noise_mq texsize_noise_mq\n"
+        "#define texsize_CP_noise_mq texsize_noise_mq\n"
+        "#define texsize_FW_noise_hq texsize_noise_hq\n"
+        "#define texsize_FC_noise_hq texsize_noise_hq\n"
+        "#define texsize_PW_noise_hq texsize_noise_hq\n"
+        "#define texsize_PC_noise_hq texsize_noise_hq\n"
+        "#define texsize_WF_noise_hq texsize_noise_hq\n"
+        "#define texsize_CF_noise_hq texsize_noise_hq\n"
+        "#define texsize_WP_noise_hq texsize_noise_hq\n"
+        "#define texsize_CP_noise_hq texsize_noise_hq\n"
+        "#define texsize_noisevol_lq float4(32.0,32.0,0.03125,0.03125)\n"
+        "#define texsize_noisevol_hq float4(32.0,32.0,0.03125,0.03125)\n"
+        "#define texsize_fw_noisevol_lq texsize_noisevol_lq\n"
+        "#define texsize_fc_noisevol_lq texsize_noisevol_lq\n"
+        "#define texsize_pw_noisevol_lq texsize_noisevol_lq\n"
+        "#define texsize_pc_noisevol_lq texsize_noisevol_lq\n"
+        "#define texsize_fw_noisevol_hq texsize_noisevol_hq\n"
+        "#define texsize_fc_noisevol_hq texsize_noisevol_hq\n"
+        "#define texsize_pw_noisevol_hq texsize_noisevol_hq\n"
+        "#define texsize_pc_noisevol_hq texsize_noisevol_hq\n"
+        "#define texsize_wf_noisevol_lq texsize_noisevol_lq\n"
+        "#define texsize_cf_noisevol_lq texsize_noisevol_lq\n"
+        "#define texsize_wp_noisevol_lq texsize_noisevol_lq\n"
+        "#define texsize_cp_noisevol_lq texsize_noisevol_lq\n"
+        "#define texsize_wf_noisevol_hq texsize_noisevol_hq\n"
+        "#define texsize_cf_noisevol_hq texsize_noisevol_hq\n"
+        "#define texsize_wp_noisevol_hq texsize_noisevol_hq\n"
+        "#define texsize_cp_noisevol_hq texsize_noisevol_hq\n"
+        "#define texsize_FW_noisevol_lq texsize_noisevol_lq\n"
+        "#define texsize_FC_noisevol_lq texsize_noisevol_lq\n"
+        "#define texsize_PW_noisevol_lq texsize_noisevol_lq\n"
+        "#define texsize_PC_noisevol_lq texsize_noisevol_lq\n"
+        "#define texsize_WF_noisevol_lq texsize_noisevol_lq\n"
+        "#define texsize_CF_noisevol_lq texsize_noisevol_lq\n"
+        "#define texsize_WP_noisevol_lq texsize_noisevol_lq\n"
+        "#define texsize_CP_noisevol_lq texsize_noisevol_lq\n"
+        "#define texsize_FW_noisevol_hq texsize_noisevol_hq\n"
+        "#define texsize_FC_noisevol_hq texsize_noisevol_hq\n"
+        "#define texsize_PW_noisevol_hq texsize_noisevol_hq\n"
+        "#define texsize_PC_noisevol_hq texsize_noisevol_hq\n"
+        "#define texsize_WF_noisevol_hq texsize_noisevol_hq\n"
+        "#define texsize_CF_noisevol_hq texsize_noisevol_hq\n"
+        "#define texsize_WP_noisevol_hq texsize_noisevol_hq\n"
+        "#define texsize_CP_noisevol_hq texsize_noisevol_hq\n"
+        "#undef GetMain\n"
+        "#undef GetPixel\n"
+        "#define D3D12_TEX2D_MAIN(u) (d3d12_source_tex.Sample(sampler_d3d12_linear_wrap, (u).xy))\n"
+        "#define GetMain(u) (D3D12_TEX2D_MAIN(u).xyz)\n"
+        "#define GetPixel(u) (D3D12_TEX2D_MAIN(u).xyz)\n"
+        "#undef GetBlur1\n"
+        "#undef GetBlur2\n"
+        "#undef GetBlur3\n"
+        "#define D3D12_TEX2D_BLUR1(u) (d3d12_blur1.Sample(sampler_d3d12_linear_clamp, (u).xy))\n"
+        "#define D3D12_TEX2D_BLUR2(u) (d3d12_blur2.Sample(sampler_d3d12_linear_clamp, (u).xy))\n"
+        "#define D3D12_TEX2D_BLUR3(u) (d3d12_blur3.Sample(sampler_d3d12_linear_clamp, (u).xy))\n"
+        "#define GetBlur1(u) (D3D12_TEX2D_BLUR1(u).xyz * _c5.x + _c5.y)\n"
+        "#define GetBlur2(u) (D3D12_TEX2D_BLUR2(u).xyz * _c5.z + _c5.w)\n"
+        "#define GetBlur3(u) (D3D12_TEX2D_BLUR3(u).xyz * _c6.x + _c6.y)\n";
     strcpy_s(&szShaderText[writePos], ARRAYSIZE(szShaderText) - writePos, szD3D12SamplerAliases);
     writePos += strlen(szD3D12SamplerAliases);
 
@@ -3249,8 +4944,18 @@ bool CPlugin::BuildD3D12PresetShaderBytecode(const char* szOrigShaderText, int s
     *dest = '\0';
 
     StripComments(&szShaderText[shaderStartPos]);
+    StripD3D12LegacyBuiltInSamplerDeclarations(&szShaderText[shaderStartPos],
+                                               ARRAYSIZE(szShaderText) - shaderStartPos);
+    std::vector<std::pair<std::string, std::wstring>> d3d12DiskSamplerAliases;
+    CollectD3D12DiskSamplerAliases(szOrigShaderText, d3d12DiskSamplerAliases);
+    RewriteD3D12KnownTex2DCalls(&szShaderText[shaderStartPos],
+                                ARRAYSIZE(szShaderText) - shaderStartPos,
+                                d3d12DiskSamplerAliases,
+                                textureRoots);
+    RewriteD3D12KnownTex3DCalls(&szShaderText[shaderStartPos],
+                                ARRAYSIZE(szShaderText) - shaderStartPos);
 
-    const std::string diskSamplerAliases = BuildD3D12DiskSamplerAliasBlock(szOrigShaderText);
+    const std::string diskSamplerAliases = BuildD3D12DiskSamplerAliasBlock(szOrigShaderText, textureRoots);
     if (!diskSamplerAliases.empty())
     {
         char* shaderBody = strstr(&szShaderText[shaderStartPos], "shader_body");
@@ -3372,6 +5077,16 @@ void CPlugin::ProbeD3D12PresetShaders(CState* pState)
     if (shaderCount == 0)
     {
         m_d3d12PresetShaderStatus.clear();
+        if (IsD3D12Mode())
+        {
+            wchar_t logLine[512]{};
+            swprintf_s(logLine,
+                       L"shader probe preset=\"%ls\" shader_count=0 fixed_pipeline=%d",
+                       pState && pState->m_szDesc[0] ? pState->m_szDesc : L"",
+                       pState && pState->m_nMaxPSVersion <= 0 ? 1 : 0);
+            WriteD3D12PluginLogLine(logLine);
+        }
+        UpdateD3D12PresetWarpShader(pState);
         UpdateD3D12PresetCompositeShader(pState);
         return;
     }
@@ -3384,19 +5099,77 @@ void CPlugin::ProbeD3D12PresetShaders(CState* pState)
                m_d3d12PresetShaderCompileOk.size(),
                m_d3d12PresetShaderCompileFailed.size());
     m_d3d12PresetShaderStatus = status;
+    {
+        wchar_t logLine[512]{};
+        swprintf_s(logLine,
+                   L"shader probe preset=\"%ls\" ok=%d/%d cache_ok=%zu cache_fail=%zu",
+                   pState && pState->m_szDesc[0] ? pState->m_szDesc : L"",
+                   okCount,
+                   shaderCount,
+                   m_d3d12PresetShaderCompileOk.size(),
+                   m_d3d12PresetShaderCompileFailed.size());
+        WriteD3D12PluginLogLine(logLine);
+    }
+    UpdateD3D12PresetWarpShader(pState);
     UpdateD3D12PresetCompositeShader(pState);
 
     if (okCount != shaderCount && !errors.empty())
     {
+        const std::string summary = SummarizeD3D12ShaderCompilerOutput(errors);
         char firstLine[512]{};
-        size_t lineLength = errors.find_first_of("\r\n");
+        size_t lineLength = summary.find_first_of("\r\n");
         if (lineLength == std::string::npos)
-            lineLength = errors.size();
+            lineLength = summary.size();
         lineLength = std::min(lineLength, std::size(firstLine) - 1);
-        memcpy(firstLine, errors.data(), lineLength);
+        memcpy(firstLine, summary.data(), lineLength);
         OutputDebugStringA("foo_vis_milk2 DX12 shader probe failed: ");
         OutputDebugStringA(firstLine);
         OutputDebugStringA("\n");
+        wchar_t wideError[512]{};
+        MultiByteToWideChar(CP_UTF8, 0, firstLine, -1, wideError, static_cast<int>(std::size(wideError)));
+        wchar_t logLine[768]{};
+        swprintf_s(logLine, L"shader probe failed first_error=\"%ls\"", wideError);
+        WriteD3D12PluginLogLine(logLine);
+    }
+}
+
+void CPlugin::UpdateD3D12PresetWarpShader(CState* pState)
+{
+    wchar_t enabledValue[8]{};
+    const bool enableWarpShader = GetEnvironmentVariableW(L"FOO_VIS_MILK2_DX12_WARP_SHADER",
+                                                          enabledValue,
+                                                          static_cast<DWORD>(std::size(enabledValue))) > 0 &&
+                                  wcscmp(enabledValue, L"0") != 0;
+    if (!enableWarpShader || !IsD3D12Mode() || !m_lpDX || !pState || pState->m_nWarpPSVersion <= 0 || !pState->m_szWarpShadersText[0])
+    {
+        m_d3d12PresetWarpShaderKey.clear();
+        if (m_lpDX)
+            m_lpDX->ClearD3D12PresetWarpShader();
+        return;
+    }
+
+    std::vector<std::wstring> textureRoots;
+    BuildD3D12PresetTextureRoots(pState, textureRoots);
+    const std::string cacheKey = std::string("warp:") + BuildD3D12TextureRootKey(&textureRoots) + ":" + pState->m_szWarpShadersText;
+    if (cacheKey == m_d3d12PresetWarpShaderKey)
+        return;
+
+    std::vector<uint8_t> bytecode;
+    std::string errors;
+    if (!BuildD3D12PresetShaderBytecode(pState->m_szWarpShadersText, SHADER_WARP, &bytecode, &errors, &textureRoots) ||
+        !m_lpDX->SetD3D12PresetWarpShader(bytecode.data(), bytecode.size()))
+    {
+        m_d3d12PresetWarpShaderKey.clear();
+        m_lpDX->ClearD3D12PresetWarpShader();
+        OutputDebugStringA("foo_vis_milk2 DX12 warp shader PSO unavailable; falling back to fixed mesh warp\n");
+        WriteD3D12PluginLogLine(L"warp shader unavailable; using fixed mesh warp");
+        return;
+    }
+
+    m_d3d12PresetWarpShaderKey = cacheKey;
+    if (!m_d3d12PresetShaderStatus.empty())
+    {
+        m_d3d12PresetShaderStatus += L" WARP";
     }
 }
 
@@ -3415,18 +5188,21 @@ void CPlugin::UpdateD3D12PresetCompositeShader(CState* pState)
         return;
     }
 
-    const std::string cacheKey = std::string("comp:") + pState->m_szCompShadersText;
+    std::vector<std::wstring> textureRoots;
+    BuildD3D12PresetTextureRoots(pState, textureRoots);
+    const std::string cacheKey = std::string("comp:") + BuildD3D12TextureRootKey(&textureRoots) + ":" + pState->m_szCompShadersText;
     if (cacheKey == m_d3d12PresetCompositeShaderKey)
         return;
 
     std::vector<uint8_t> bytecode;
     std::string errors;
-    if (!BuildD3D12PresetShaderBytecode(pState->m_szCompShadersText, SHADER_COMP, &bytecode, &errors) ||
+    if (!BuildD3D12PresetShaderBytecode(pState->m_szCompShadersText, SHADER_COMP, &bytecode, &errors, &textureRoots) ||
         !m_lpDX->SetD3D12PresetCompositeShader(bytecode.data(), bytecode.size()))
     {
         m_d3d12PresetCompositeShaderKey.clear();
         m_lpDX->ClearD3D12PresetCompositeShader();
         OutputDebugStringA("foo_vis_milk2 DX12 composite shader PSO unavailable; falling back to fixed postprocess\n");
+        WriteD3D12PluginLogLine(L"composite shader unavailable; using fixed postprocess");
         return;
     }
 
@@ -6327,6 +8103,54 @@ void CPlugin::NextPreset(float fBlendTime)
     LoadRandomPreset(fBlendTime);
 }
 
+bool CPlugin::LoadD3D12StartupPresetOverride(float fBlendTime)
+{
+    if (!IsD3D12Mode())
+        return false;
+
+    wchar_t overrideValue[MAX_PATH]{};
+    const DWORD valueLength = GetEnvironmentVariableW(L"FOO_VIS_MILK2_DX12_START_PRESET",
+                                                      overrideValue,
+                                                      static_cast<DWORD>(std::size(overrideValue)));
+    if (valueLength == 0 || wcscmp(overrideValue, L"0") == 0)
+        return false;
+
+    if (valueLength >= std::size(overrideValue))
+    {
+        WriteD3D12PluginLogLine(L"startup preset override ignored reason=too_long");
+        return false;
+    }
+
+    wchar_t presetPath[MAX_PATH]{};
+    const bool hasPath = wcschr(overrideValue, L'\\') || wcschr(overrideValue, L'/') ||
+                         (wcslen(overrideValue) > 1 && overrideValue[1] == L':');
+    if (hasPath)
+    {
+        wcscpy_s(presetPath, overrideValue);
+    }
+    else
+    {
+        wcscpy_s(presetPath, m_szPresetDir);
+        wcscat_s(presetPath, overrideValue);
+    }
+
+    if (GetFileAttributesW(presetPath) == INVALID_FILE_ATTRIBUTES)
+    {
+        wchar_t logLine[1024]{};
+        swprintf_s(logLine, L"startup preset override missing preset=\"%ls\"", presetPath);
+        WriteD3D12PluginLogLine(logLine);
+        return false;
+    }
+
+    wchar_t logLine[1024]{};
+    swprintf_s(logLine, L"startup preset override loading preset=\"%ls\"", presetPath);
+    WriteD3D12PluginLogLine(logLine);
+
+    LoadPreset(presetPath, fBlendTime);
+    SetPresetListPosition(presetPath);
+    return true;
+}
+
 void CPlugin::LoadRandomPreset(float fBlendTime)
 {
     // Ensure file list is OK.
@@ -6812,6 +8636,15 @@ void CPlugin::CaptureD3D12VisualState()
         m_d3d12ResumeFrameWidth = width;
         m_d3d12ResumeFrameHeight = height;
     }
+
+    wchar_t logLine[512]{};
+    swprintf_s(logLine,
+               L"capture visual state captured=%d size=%ux%u preset=\"%ls\"",
+               captured ? 1 : 0,
+               width,
+               height,
+               m_pState && m_pState->m_szDesc[0] ? m_pState->m_szDesc : L"");
+    WriteD3D12PluginLogLine(logLine);
 }
 
 void CPlugin::RestoreD3D12VisualState()
@@ -6832,6 +8665,17 @@ void CPlugin::RestoreD3D12VisualState()
         restored = false;
     }
 
+    wchar_t logLine[512]{};
+    swprintf_s(logLine,
+               L"restore visual state restored=%d source=%ux%u target=%dx%d preset=\"%ls\"",
+               restored ? 1 : 0,
+               m_d3d12ResumeFrameWidth,
+               m_d3d12ResumeFrameHeight,
+               m_lpDX ? m_lpDX->m_client_width : 0,
+               m_lpDX ? m_lpDX->m_client_height : 0,
+               m_pState && m_pState->m_szDesc[0] ? m_pState->m_szDesc : L"");
+    WriteD3D12PluginLogLine(logLine);
+
     if (restored)
     {
         m_d3d12ResumeFramePixels.clear();
@@ -6847,10 +8691,20 @@ void CPlugin::ResumeD3D12AfterWindowSwap()
 
     m_nLoadingPreset = 0;
     m_szLoadingPreset[0] = 0;
-    m_pState->m_bBlending = false;
-    m_fPresetStartTime = GetTime();
-    m_fNextPresetTime = -1.0f;
+
+    SelectD3D12PresetTexture();
+    m_d3d12PresetWarpShaderKey.clear();
+    m_d3d12PresetCompositeShaderKey.clear();
     ProbeD3D12PresetShaders(m_pState);
+
+    wchar_t logLine[512]{};
+    swprintf_s(logLine,
+               L"resume after window swap target=%dx%d preset=\"%ls\" shader_status=\"%ls\"",
+               m_lpDX ? m_lpDX->m_client_width : 0,
+               m_lpDX ? m_lpDX->m_client_height : 0,
+               m_pState && m_pState->m_szDesc[0] ? m_pState->m_szDesc : L"",
+               m_d3d12PresetShaderStatus.empty() ? L"" : m_d3d12PresetShaderStatus.c_str());
+    WriteD3D12PluginLogLine(logLine);
 }
 
 void CPlugin::SetPresetListPosition(std::wstring search)

@@ -1840,11 +1840,41 @@ UINT milk2_ui_element::OnGetDlgCode(LPMSG lpMsg)
     return WM_GETDLGCODE;
 }
 
+void milk2_ui_element::RegisterFocusHotkeys() noexcept
+{
+    if (m_focus_hotkeys_registered || !::IsWindow(get_wnd()))
+        return;
+
+    if (::RegisterHotKey(get_wnd(), IDHK_SHOW_TITLE, 0, VK_F2) &&
+        ::RegisterHotKey(get_wnd(), IDHK_SHOW_TIME, 0, VK_F3) &&
+        ::RegisterHotKey(get_wnd(), IDHK_TOGGLE_FULLSCREEN, MOD_ALT, VK_RETURN))
+    {
+        m_focus_hotkeys_registered = true;
+        return;
+    }
+
+    ::UnregisterHotKey(get_wnd(), IDHK_SHOW_TITLE);
+    ::UnregisterHotKey(get_wnd(), IDHK_SHOW_TIME);
+    ::UnregisterHotKey(get_wnd(), IDHK_TOGGLE_FULLSCREEN);
+}
+
+void milk2_ui_element::UnregisterFocusHotkeys() noexcept
+{
+    if (!m_focus_hotkeys_registered || !::IsWindow(get_wnd()))
+        return;
+
+    ::UnregisterHotKey(get_wnd(), IDHK_SHOW_TITLE);
+    ::UnregisterHotKey(get_wnd(), IDHK_SHOW_TIME);
+    ::UnregisterHotKey(get_wnd(), IDHK_TOGGLE_FULLSCREEN);
+    m_focus_hotkeys_registered = false;
+}
+
 void milk2_ui_element::OnSetFocus(CWindow wndOld)
 {
     UNREFERENCED_PARAMETER(wndOld);
 
     MILK2_CONSOLE_LOG("OnSetFocus ", GetWnd())
+    RegisterFocusHotkeys();
     //g_plugin.m_bOrigScrollLockState = GetKeyState(VK_SCROLL) & 1;
     //SetScrollLock(g_plugin.m_bMilkdropScrollLockState);
 }
@@ -1854,8 +1884,90 @@ void milk2_ui_element::OnKillFocus(CWindow wndFocus)
     UNREFERENCED_PARAMETER(wndFocus);
 
     MILK2_CONSOLE_LOG("OnKillFocus ", GetWnd())
+    UnregisterFocusHotkeys();
+    KillTimer(ID_CLICK_TIMER);
+    m_pending_single_click = false;
     //g_plugin.m_bMilkdropScrollLockState = GetKeyState(VK_SCROLL) & 1;
     //SetScrollLock(g_plugin.m_bOrigScrollLockState);
+}
+
+LRESULT milk2_ui_element::OnHotKey(UINT uMsg, WPARAM wParam, LPARAM lParam)
+{
+    UNREFERENCED_PARAMETER(lParam);
+
+    if (uMsg != WM_HOTKEY)
+        return 0;
+
+    switch (wParam)
+    {
+        case IDHK_SHOW_TITLE:
+            ToggleSongTitle();
+            return 0;
+        case IDHK_SHOW_TIME:
+            ToggleSongLength();
+            return 0;
+        case IDHK_TOGGLE_FULLSCREEN:
+            if (g_plugin.GetFrame() > 0)
+                ToggleFullScreen();
+            return 0;
+        default:
+            return 0;
+    }
+}
+
+void milk2_ui_element::OnLButtonDown(UINT nFlags, CPoint point)
+{
+    UNREFERENCED_PARAMETER(nFlags);
+    UNREFERENCED_PARAMETER(point);
+
+    const HWND focus = ::GetFocus();
+    const bool hadFocus = (focus == get_wnd()) || ::IsChild(get_wnd(), focus);
+    if (!hadFocus)
+    {
+        ::SetFocus(get_wnd());
+        return;
+    }
+
+    if (!s_config.settings.m_bEnableMouseClickPlayPause)
+        return;
+
+    KillTimer(ID_CLICK_TIMER);
+    m_pending_single_click = true;
+    SetTimer(ID_CLICK_TIMER, GetDoubleClickTime(), nullptr);
+}
+
+BOOL milk2_ui_element::OnMouseWheel(UINT nFlags, short zDelta, CPoint point)
+{
+    UNREFERENCED_PARAMETER(nFlags);
+    UNREFERENCED_PARAMETER(point);
+
+    if (!s_config.settings.m_bEnableMouseWheelVolume || zDelta == 0)
+        return FALSE;
+
+    if (::GetFocus() != get_wnd())
+        ::SetFocus(get_wnd());
+
+    int steps = zDelta / WHEEL_DELTA;
+    if (steps == 0)
+        steps = (zDelta > 0) ? 1 : -1;
+
+    if (steps > 0)
+    {
+        for (int i = 0; i < steps; ++i)
+            m_playback_control->volume_up();
+    }
+    else
+    {
+        for (int i = 0; i < -steps; ++i)
+            m_playback_control->volume_down();
+    }
+
+    return TRUE;
+}
+
+void milk2_ui_element::TogglePlaybackFromClick()
+{
+    m_playback_control->toggle_pause();
 }
 
 #undef waitstring

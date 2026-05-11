@@ -559,6 +559,7 @@ class CPlugin : public CPluginShell
     std::set<std::string> m_d3d12PresetShaderCompileFailed;
     std::map<std::string, std::vector<uint8_t>> m_d3d12PresetShaderBytecodeCache;
     std::wstring m_d3d12PresetShaderStatus;
+    std::string m_d3d12PresetWarpShaderKey;
     std::string m_d3d12PresetCompositeShaderKey;
     std::vector<uint8_t> m_d3d12ResumeFramePixels;
     UINT m_d3d12ResumeFrameWidth = 0;
@@ -582,8 +583,10 @@ class CPlugin : public CPluginShell
     void WriteRealtimeConfig(); // called on Finish()
 #else
     bool PanelSettings(plugin_config* settings);
+    void SetFoobarFullscreenFrameLimit(uint32_t max_fps) noexcept;
 #endif
     bool IsD3D12Active() const { return IsD3D12Mode(); }
+    bool LoadD3D12StartupPresetOverride(float fBlendTime);
     void LoadRandomPreset(float fBlendTime);
     void LoadPreset(const wchar_t* szPresetFilename, float fBlendTime);
     void LoadPresetTick();
@@ -631,8 +634,9 @@ class CPlugin : public CPluginShell
 
     bool LoadShaders(PShaderSet* sh, CState* pState, bool bTick);
     bool CompileD3D12PresetShaderProbe(const char* shaderText, int shaderType, std::string* errors);
-    bool BuildD3D12PresetShaderBytecode(const char* shaderText, int shaderType, std::vector<uint8_t>* bytecode, std::string* errors);
+    bool BuildD3D12PresetShaderBytecode(const char* shaderText, int shaderType, std::vector<uint8_t>* bytecode, std::string* errors, const std::vector<std::wstring>* textureRoots = nullptr);
     void ProbeD3D12PresetShaders(CState* pState);
+    void UpdateD3D12PresetWarpShader(CState* pState);
     void UpdateD3D12PresetCompositeShader(CState* pState);
     void UvToMathSpace(float u, float v, float* rad, float* ang);
     void ApplyShaderParams(CShaderParams* p, CConstantTable* pCT, CState* pState);

@@ -75,6 +75,7 @@ class DXContext final
     BOOL StartOrRestartDevice(DXCONTEXT_PARAMS* pParams); // also serves as Init() function
     BOOL OnWindowSizeChanged(int width, int height);
     BOOL OnWindowSwap(HWND window, int width, int height);
+    bool EnsureD3D12WindowSize(int width, int height);
     void OnWindowMoved();
     void OnDisplayChange();
     inline HWND GetHwnd() const { return m_hwnd; };
@@ -83,8 +84,11 @@ class DXContext final
     void SetTextureDirectory(const wchar_t* textureDirectory);
     bool SetTextureFile(const wchar_t* textureFile);
     bool SetTextureFiles(const wchar_t* const* textureFiles, size_t textureFileCount);
+    void ClearTextureFiles();
     bool SetPresetTextureFiles(const wchar_t* const* textureFiles, size_t textureFileCount);
     void ClearPresetTextureOverride();
+    bool SetD3D12PresetWarpShader(const void* bytecode, size_t bytecodeSize);
+    void ClearD3D12PresetWarpShader();
     bool SetD3D12PresetCompositeShader(const void* bytecode, size_t bytecodeSize);
     void ClearD3D12PresetCompositeShader();
     void SetD3D12PresetShaderRuntimeConstants(float time,
