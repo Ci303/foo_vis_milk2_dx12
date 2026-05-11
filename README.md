@@ -14,6 +14,23 @@ $env:FOO_VIS_MILK2_DX12_DEV = "1"
 
 Without that variable, the component follows the existing DirectX 11 path.
 
+### Status Note - May 11, 2026
+
+Resolved in the current development build:
+
+- DX12 visualisation startup, windowed rendering, fullscreen entry, fullscreen exit, and normal window resize/move are substantially more stable than the early May 7 build.
+- The hard fullscreen-to-window freeze/crash path has been addressed in current testing.
+- DX12 presets now retain the active preset/visual state across fullscreen/window transitions instead of frequently resetting to a fallback background.
+- Native DX12 texture loading, preset background selection, feedback/blur/postprocess passes, shader probe/cache logging, and bitmap text overlay support are in place.
+- Preset name, track title, and FPS text can render in the DX12 overlay, with text scaling fixes for window size changes.
+
+Still being worked on:
+
+- Preference parity with the live DX11 build is incomplete. Some controls have been ported, but help display, keybind behavior, and parts of the preferences page still need a full DX11 parity pass.
+- The FPS limiter is still not considered fixed. The current implementation attempts to honor the configured preference, including unlimited mode, but user testing shows frame pacing is still wrong.
+- Full MilkDrop DX11 visual parity is not complete. Some presets still look simpler in fullscreen or show static/low-interaction backgrounds.
+- DX11-only features such as blacklist handling, full format-info UI, font-outline options, and complete help/keybinding behavior still need to be converted.
+
 Optional DX12 development flags used during portable testing:
 
 ```powershell

@@ -84,8 +84,11 @@ class milk2_ui_element : public ui_element_instance, public CWindowImpl<milk2_ui
         MSG_WM_SETFOCUS(OnSetFocus)
         MSG_WM_KILLFOCUS(OnKillFocus)
         MSG_WM_CONTEXTMENU(OnContextMenu)
+        MSG_WM_LBUTTONDOWN(OnLButtonDown)
         MSG_WM_LBUTTONDBLCLK(OnLButtonDblClk)
+        MSG_WM_MOUSEWHEEL(OnMouseWheel)
         MSG_WM_POWERBROADCAST(OnPowerBroadcast)
+        MESSAGE_HANDLER_EX(WM_HOTKEY, OnHotKey)
         MESSAGE_HANDLER_EX(WM_IME_NOTIFY, OnImeNotify)
         MESSAGE_HANDLER_EX(WM_QUIT, OnQuit)
         MESSAGE_HANDLER_EX(WM_MILK2, OnMilk2Message)
@@ -142,7 +145,10 @@ class milk2_ui_element : public ui_element_instance, public CWindowImpl<milk2_ui
     void OnSetFocus(CWindow wndOld);
     void OnKillFocus(CWindow wndFocus);
     void OnContextMenu(CWindow wnd, CPoint point);
+    void OnLButtonDown(UINT nFlags, CPoint point);
     void OnLButtonDblClk(UINT nFlags, CPoint point);
+    BOOL OnMouseWheel(UINT nFlags, short zDelta, CPoint point);
+    LRESULT OnHotKey(UINT uMsg, WPARAM wParam, LPARAM lParam);
     LRESULT OnImeNotify(UINT uMsg, WPARAM wParam, LPARAM lParam);
     LRESULT OnQuit(UINT uMsg, WPARAM wParam, LPARAM lParam);
     LRESULT OnMilk2Message(UINT uMsg, WPARAM wParam, LPARAM lParam);
@@ -171,6 +177,7 @@ class milk2_ui_element : public ui_element_instance, public CWindowImpl<milk2_ui
         ID_REFRESH_TIMER = 1
     };
 #endif
+    static constexpr UINT_PTR ID_CLICK_TIMER = 2;
 
     enum milk2_ui_menu_id
     {
@@ -183,6 +190,11 @@ class milk2_ui_element : public ui_element_instance, public CWindowImpl<milk2_ui
         IDM_ENABLE_DOWNMIX = 3,
         IDM_SHOW_TITLE = 4,
         IDM_SHOW_ALBUM = 5,
+        IDM_SHOW_FPS = 6,
+        IDM_SHOW_PRESET_INFO = 7,
+        IDM_SHOW_RATING = 8,
+        IDM_SHOW_SONG_TIME = 9,
+        IDM_SHOW_SHADER_HELP = 10,
         IDM_SHOW_MENU = ID_VIS_MENU,
         IDM_SHOW_PREFS = ID_VIS_CFG,
         IDM_SHOW_HELP = ID_SHOWHELP,
@@ -222,6 +234,7 @@ class milk2_ui_element : public ui_element_instance, public CWindowImpl<milk2_ui
 
     // Properties
     void GetDefaultSize(int& width, int& height) const noexcept;
+    void ApplyFrameRateLimit() noexcept;
     void SetPwd(std::wstring pwd) noexcept;
     void UpdateChannelMode();
     void ToggleFullScreen();
@@ -234,6 +247,17 @@ class milk2_ui_element : public ui_element_instance, public CWindowImpl<milk2_ui
     void ToggleRating();
     void ToggleShaderHelp();
     const char* ToggleShuffle(bool forward);
+
+    enum milk2_ui_hotkey_id
+    {
+        IDHK_SHOW_TITLE = 0x2000,
+        IDHK_SHOW_TIME = 0x2001,
+        IDHK_TOGGLE_FULLSCREEN = 0x2003
+    };
+
+    void RegisterFocusHotkeys() noexcept;
+    void UnregisterFocusHotkeys() noexcept;
+    void TogglePlaybackFromClick();
 
     // MilkDrop status
     std::atomic_bool m_milk2{false};
@@ -249,7 +273,12 @@ class milk2_ui_element : public ui_element_instance, public CWindowImpl<milk2_ui
     // Thread pool timer
     void StartTimer() noexcept;
     void StopTimer() noexcept;
+    void ScheduleNextFrameTimer() noexcept;
+    void AdvanceFrameTimerDeadline() noexcept;
     static VOID CALLBACK TimerCallback(PTP_CALLBACK_INSTANCE Instance, PVOID Context, PTP_TIMER Timer) noexcept;
+    LONGLONG m_frameTimerFrequencyQpc;
+    std::atomic<LONGLONG> m_frameIntervalQpc{0};
+    std::atomic<LONGLONG> m_nextFrameQpc{0};
     PTP_TIMER m_tpTimer;
     std::atomic_bool m_renderPending{false};
     std::atomic_ulong m_renderPostTick{0};
@@ -270,6 +299,9 @@ class milk2_ui_element : public ui_element_instance, public CWindowImpl<milk2_ui
 
     // Playback control
     static_api_ptr_t<playback_control> m_playback_control;
+    bool m_focus_hotkeys_registered;
+    bool m_pending_single_click;
+    DWORD m_last_left_double_click_tick;
     titleformat_object::ptr m_script;
     titleformat_object::ptr m_title;
     titleformat_object::ptr m_search;

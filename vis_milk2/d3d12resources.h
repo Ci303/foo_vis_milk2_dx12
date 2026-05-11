@@ -88,8 +88,11 @@ class D3D12Resources
     void SetTextureDirectory(const wchar_t* textureDirectory);
     bool SetTextureFile(const wchar_t* textureFile);
     bool SetTextureFiles(const wchar_t* const* textureFiles, size_t textureFileCount);
+    void ClearTextureFiles();
     bool SetPresetTextureFiles(const wchar_t* const* textureFiles, size_t textureFileCount);
     void ClearPresetTextureOverride();
+    bool SetPresetWarpShader(const void* bytecode, size_t bytecodeSize);
+    void ClearPresetWarpShader();
     bool SetPresetCompositeShader(const void* bytecode, size_t bytecodeSize);
     void ClearPresetCompositeShader();
     void ResetVisualHistory();
@@ -206,8 +209,19 @@ class D3D12Resources
     std::wstring GetTextureDirectory() const { return m_textureDirectory; }
     bool HasPresetTextureOverride() const noexcept { return m_presetTextureOverride; }
     std::vector<std::wstring> GetActiveTextureFiles() const;
+    static constexpr UINT MaxPresetTextureLayers() noexcept { return c_maxTextureLayers; }
+    static constexpr UINT NoiseTextureSrvStart() noexcept { return c_noiseTextureSrvStart; }
+    static constexpr UINT NoiseVolumeTextureSrvStart() noexcept { return c_noiseVolumeTextureSrvStart; }
+    static constexpr UINT BlurTextureSrvStart() noexcept { return c_blurTextureSrvStart; }
+    static constexpr UINT ShaderSrvCount() noexcept { return c_shaderSrvCount; }
+    static constexpr UINT ShaderLinearWrapSampler() noexcept { return c_samplerLinearWrap; }
+    static constexpr UINT ShaderLinearClampSampler() noexcept { return c_samplerLinearClamp; }
+    static constexpr UINT ShaderPointWrapSampler() noexcept { return c_samplerPointWrap; }
+    static constexpr UINT ShaderPointClampSampler() noexcept { return c_samplerPointClamp; }
 
   private:
+    struct TextureSlot;
+
     void CreateFactory();
     void GetHardwareAdapter(IDXGIAdapter1** adapter);
     void MoveToNextFrame();
@@ -217,8 +231,13 @@ class D3D12Resources
     void CreateTextureResources();
     void CreatePostProcessResources();
     void CreatePostProcessTexture();
+    bool CreatePresetWarpPipeline();
     bool CreatePresetCompositePipeline();
+    void UpdatePresetShaderConstantBuffer();
     void RefreshPostProcessTextureSrvs();
+    void RefreshShaderTextureLayerSrvs(ID3D12DescriptorHeap* descriptorHeap);
+    void ClearBlurTexturesIfNeeded();
+    bool RenderBlurTextures(float blurEdgeDarken);
     bool LoadTextureFromFile(const wchar_t* textureFile, UINT slotIndex);
     bool LoadTextureFromWic(const wchar_t* textureFile, UINT slotIndex);
     bool LoadTextureFromTga(const wchar_t* textureFile, UINT slotIndex);
@@ -232,7 +251,29 @@ class D3D12Resources
                            UINT sourceRowPitch,
                            UINT sourceRowCount,
                            UINT slotIndex);
+    bool UploadTextureSlotData(TextureSlot& slot,
+                               UINT width,
+                               UINT height,
+                               DXGI_FORMAT format,
+                               const uint8_t* pixels,
+                               size_t pixelsSize,
+                               UINT sourceRowPitch,
+                               UINT sourceRowCount);
+    bool CreateNoiseTextures();
+    bool CreateNoiseTexture(UINT noiseIndex, UINT size, UINT zoomFactor, UINT seed);
+    bool CreateNoiseVolumeTexture(UINT noiseIndex, UINT size, UINT zoomFactor, UINT seed);
+    bool UploadTextureVolumeSlotData(TextureSlot& slot,
+                                     UINT width,
+                                     UINT height,
+                                     UINT depth,
+                                     DXGI_FORMAT format,
+                                     const uint8_t* pixels,
+                                     size_t pixelsSize,
+                                     UINT sourceRowPitch,
+                                     UINT sourceRowCount,
+                                     UINT sourceDepthCount);
     bool SetTextureFilesInternal(const wchar_t* const* textureFiles, size_t textureFileCount, bool presetTextureOverride);
+    void ClearTextureSlots();
     void RefreshTextureFileList();
     bool IsPostProcessEnabled() const;
     bool IsPostProcessBlurEnabled() const;
@@ -244,6 +285,7 @@ class D3D12Resources
     void CreateFeedbackResources();
     bool IsResumeFeedbackCompatible(UINT width, UINT height) const;
     void ClearResumeFeedback();
+    bool SeedFeedbackTexturesFromResume();
     bool CaptureBackBufferForResume();
     void CopyBackBufferToFeedback(UINT feedbackIndex);
     bool CopyBackBufferToPostProcessSource();
@@ -260,7 +302,9 @@ class D3D12Resources
                          float motionDY,
                          float motionStretchX,
                          float motionStretchY,
-                         float motionWarp);
+                         float motionWarp,
+                         float baseLayerAlpha = 1.0f,
+                         float extraLayerAlphaScale = 1.0f);
     void DrawTextureQuadFromSrv(D3D12_GPU_DESCRIPTOR_HANDLE srvHandle,
                                 ID3D12DescriptorHeap* descriptorHeap,
                                 float bass,
@@ -297,21 +341,41 @@ class D3D12Resources
                             float decay,
                             float alphaScale,
                             bool applyDecayTint,
-                            bool additive = false);
+                            bool additive = false,
+                            bool usePresetWarpShader = false,
+                            ID3D12Resource* shaderSourceTexture = nullptr);
     void DrawPostProcessFromSrv(D3D12_GPU_DESCRIPTOR_HANDLE srvHandle,
                                 ID3D12DescriptorHeap* descriptorHeap,
                                 float gamma,
                                 bool brighten,
                                 bool darken,
-                                bool solarize,
-                                bool invert,
-                                float shaderAmount,
-                                const float* hueShaderColors,
-                                float blurAmount,
-                                float blurEdgeDarken);
+                            bool solarize,
+                            bool invert,
+                            float shaderAmount,
+                            const float* hueShaderColors,
+                            float blurAmount,
+                            float blurEdgeDarken,
+                            float echoAlpha,
+                            float echoZoom,
+                            int echoOrientation);
 
     static constexpr UINT c_maxBackBufferCount = 3;
-    static constexpr UINT c_maxTextureLayers = 4;
+    static constexpr UINT c_maxTextureLayers = 16;
+    static constexpr UINT c_noiseTextureCount = 4;
+    static constexpr UINT c_noiseVolumeTextureCount = 2;
+    static constexpr UINT c_visibleBlurTextureCount = 3;
+    static constexpr UINT c_blurRenderTextureCount = 6;
+    static constexpr UINT c_sourceSrvIndex = 0;
+    static constexpr UINT c_textureLayerSrvStart = c_sourceSrvIndex + 1;
+    static constexpr UINT c_noiseTextureSrvStart = c_textureLayerSrvStart + c_maxTextureLayers;
+    static constexpr UINT c_noiseVolumeTextureSrvStart = c_noiseTextureSrvStart + c_noiseTextureCount;
+    static constexpr UINT c_blurTextureSrvStart = c_noiseVolumeTextureSrvStart + c_noiseVolumeTextureCount;
+    static constexpr UINT c_shaderSrvCount = c_blurTextureSrvStart + c_visibleBlurTextureCount;
+    static constexpr UINT c_samplerLinearWrap = 0;
+    static constexpr UINT c_samplerLinearClamp = c_samplerLinearWrap + 1;
+    static constexpr UINT c_samplerPointWrap = c_samplerLinearClamp + 1;
+    static constexpr UINT c_samplerPointClamp = c_samplerPointWrap + 1;
+    static constexpr UINT c_shaderStaticSamplerCount = c_samplerPointClamp + 1;
     static constexpr UINT c_maxWaveformVertices = 65536;
     static constexpr UINT c_maxTextureVertices = 32768;
 
@@ -368,6 +432,8 @@ class D3D12Resources
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_textureAdditivePipelineState;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_textureVertexBuffers[c_maxBackBufferCount];
     TextureSlot m_textureSlots[c_maxTextureLayers];
+    TextureSlot m_noiseTextureSlots[c_noiseTextureCount];
+    TextureSlot m_noiseVolumeTextureSlots[c_noiseVolumeTextureCount];
     UINT m_activeTextureLayerCount = 0;
     UINT m_srvDescriptorSize = 0;
     D3D12_VERTEX_BUFFER_VIEW m_textureVertexBufferViews[c_maxBackBufferCount]{};
@@ -376,13 +442,27 @@ class D3D12Resources
     TextureVertex* m_mappedTextureVertices = nullptr;
     UINT m_textureVertexCursor = 0;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_postProcessSrvHeap;
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_warpShaderSrvHeap;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> m_postProcessRootSignature;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_postProcessPipelineState;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_presetWarpPipelineState;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_presetCompositePipelineState;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_blurHorizontalPipelineState;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_blurVerticalPipelineState;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_postProcessTexture;
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_blurTextures[c_blurRenderTextureCount];
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_blurRtvHeap;
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_blurPassSrvHeap;
+    UINT m_blurTextureWidths[c_blurRenderTextureCount]{};
+    UINT m_blurTextureHeights[c_blurRenderTextureCount]{};
+    bool m_blurTexturesPrimed = false;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_postProcessConstantBuffer;
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_blurConstantBuffer;
     uint8_t* m_mappedPostProcessConstantBuffer = nullptr;
+    uint8_t* m_mappedBlurConstantBuffer = nullptr;
+    std::vector<uint8_t> m_textureVertexShaderBytecode;
     std::vector<uint8_t> m_postProcessVertexShaderBytecode;
+    std::vector<uint8_t> m_presetWarpShaderBytecode;
     std::vector<uint8_t> m_presetCompositeShaderBytecode;
     float m_presetShaderTime = 0.0f;
     float m_presetShaderFps = 0.0f;

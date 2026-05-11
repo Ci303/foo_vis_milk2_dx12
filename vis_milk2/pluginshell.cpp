@@ -258,6 +258,11 @@ bool CPluginShell::RestartD3D12ForWindow(HWND window, int width, int height, eSc
     if (!InitDirectX())
         return false;
 
+    if (m_lpDX && m_lpDX->IsD3D12Mode())
+    {
+        return m_lpDX->EnsureD3D12WindowSize(width, height);
+    }
+
     m_lpDX->m_client_width = std::max(width, 1);
     m_lpDX->m_client_height = std::max(height, 1);
     return m_lpDX->m_ready;

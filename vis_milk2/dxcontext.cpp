@@ -235,6 +235,14 @@ bool DXContext::SetTextureFiles(const wchar_t* const* textureFiles, size_t textu
     return m_useD3D12 && m_d3d12Resources && m_d3d12Resources->SetTextureFiles(textureFiles, textureFileCount);
 }
 
+void DXContext::ClearTextureFiles()
+{
+    if (m_useD3D12 && m_d3d12Resources)
+    {
+        m_d3d12Resources->ClearTextureFiles();
+    }
+}
+
 bool DXContext::SetPresetTextureFiles(const wchar_t* const* textureFiles, size_t textureFileCount)
 {
     return m_useD3D12 && m_d3d12Resources && m_d3d12Resources->SetPresetTextureFiles(textureFiles, textureFileCount);
@@ -245,6 +253,19 @@ void DXContext::ClearPresetTextureOverride()
     if (m_useD3D12 && m_d3d12Resources)
     {
         m_d3d12Resources->ClearPresetTextureOverride();
+    }
+}
+
+bool DXContext::SetD3D12PresetWarpShader(const void* bytecode, size_t bytecodeSize)
+{
+    return m_useD3D12 && m_d3d12Resources && m_d3d12Resources->SetPresetWarpShader(bytecode, bytecodeSize);
+}
+
+void DXContext::ClearD3D12PresetWarpShader()
+{
+    if (m_useD3D12 && m_d3d12Resources)
+    {
+        m_d3d12Resources->ClearPresetWarpShader();
     }
 }
 
@@ -528,6 +549,43 @@ BOOL DXContext::OnWindowSizeChanged(int width, int height)
 
     m_ready = TRUE;
     return TRUE;
+}
+
+bool DXContext::EnsureD3D12WindowSize(int width, int height)
+{
+    if (!m_ready || !m_useD3D12 || !m_d3d12Resources)
+    {
+        return false;
+    }
+
+    const int targetWidth = std::max(width, 1);
+    const int targetHeight = std::max(height, 1);
+    const RECT outputSize = m_d3d12Resources->GetOutputSize();
+    if (outputSize.right != targetWidth || outputSize.bottom != targetHeight)
+    {
+        try
+        {
+            if (!m_d3d12Resources->WindowSizeChanged(targetWidth, targetHeight))
+            {
+                m_lastErr = DX_ERR_RESIZEFAILED;
+                m_ready = FALSE;
+                return false;
+            }
+        }
+        catch (...)
+        {
+            m_lastErr = DX_ERR_RESIZEFAILED;
+            m_ready = FALSE;
+            return false;
+        }
+    }
+
+    m_client_width = targetWidth;
+    m_client_height = targetHeight;
+    m_d3d12PendingWidth = targetWidth;
+    m_d3d12PendingHeight = targetHeight;
+    m_d3d12ResizePending = false;
+    return true;
 }
 
 BOOL DXContext::OnWindowSwap(HWND window, int width, int height)
