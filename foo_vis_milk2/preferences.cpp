@@ -9,11 +9,249 @@
 
 #include "pch.h"
 #include "config.h"
+#include <vis_milk2/plugin.h>
+
+#include <algorithm>
+#include <fstream>
+#include <string_view>
 
 extern HWND g_hWindow;
 
 namespace
 {
+constexpr const wchar_t* g_format_example_1 = L"[%artist%$crlf()]%title%";
+constexpr const wchar_t* g_format_example_2 = L"[%artist%$crlf()][%album%$crlf()]%title%";
+
+UINT sanitize_max_fps(UINT maxFps) noexcept
+{
+    for (size_t i = 0; i < supported_max_fps_count; ++i)
+    {
+        if (maxFps == supported_max_fps_values[i])
+            return maxFps;
+    }
+    return default_max_fps_fs;
+}
+
+UINT max_fps_from_combo_index(LRESULT index) noexcept
+{
+    if (index < 0)
+        return default_max_fps_fs;
+
+    const auto valueIndex = static_cast<size_t>(index);
+    if (valueIndex >= supported_max_fps_count)
+        return default_max_fps_fs;
+    return supported_max_fps_values[valueIndex];
+}
+
+WPARAM combo_index_from_max_fps(UINT maxFps) noexcept
+{
+    maxFps = sanitize_max_fps(maxFps);
+    for (size_t i = 0; i < supported_max_fps_count; ++i)
+    {
+        if (supported_max_fps_values[i] == maxFps)
+            return static_cast<WPARAM>(i);
+    }
+    return 0;
+}
+
+struct format_field_entry_t
+{
+    const wchar_t* label;
+    const wchar_t* token;
+};
+
+constexpr format_field_entry_t g_format_field_entries[] = {
+    {L"track artist", L"%artist%"},
+    {L"track title", L"%title%"},
+    {L"album title", L"%album%"},
+    {L"album artist", L"%album artist%"},
+    {L"year / date", L"%date%"},
+    {L"track number", L"%tracknumber%"},
+    {L"disc number", L"%discnumber%"},
+    {L"genre", L"%genre%"},
+    {L"duration", L"%length%"},
+    {L"codec / format", L"%codec%"},
+    {L"bitrate / quality", L"%bitrate%"},
+    {L"sample rate", L"%samplerate%"},
+    {L"bit depth", L"%bitspersample%"},
+    {L"channels", L"%channels%"},
+    {L"file name", L"%filename_ext%"},
+    {L"file path", L"%path%"},
+};
+
+bool copy_text_to_clipboard(HWND owner, const wchar_t* text)
+{
+    if (!text)
+        return false;
+
+    if (!OpenClipboard(owner))
+        return false;
+
+    bool copied = false;
+    do
+    {
+        if (!EmptyClipboard())
+            break;
+
+        const size_t bytes = (wcslen(text) + 1) * sizeof(wchar_t);
+        HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, bytes);
+        if (!memory)
+            break;
+
+        void* locked = GlobalLock(memory);
+        if (!locked)
+        {
+            GlobalFree(memory);
+            break;
+        }
+
+        memcpy(locked, text, bytes);
+        GlobalUnlock(memory);
+
+        if (!SetClipboardData(CF_UNICODETEXT, memory))
+        {
+            GlobalFree(memory);
+            break;
+        }
+
+        copied = true;
+    } while (false);
+
+    CloseClipboard();
+    return copied;
+}
+
+std::wstring get_window_text(HWND wnd)
+{
+    const int length = ::GetWindowTextLength(wnd);
+    if (length <= 0)
+        return {};
+
+    std::wstring text(static_cast<size_t>(length) + 1, L'\0');
+    ::GetWindowText(wnd, text.data(), length + 1);
+    text.resize(static_cast<size_t>(length));
+    return text;
+}
+
+std::string_view get_default_edit_template(LPCWSTR filename) noexcept
+{
+    if (wcscmp(filename, IMG_INIFILE) == 0)
+    {
+        return R"ini(; MilkDrop custom sprite definitions.
+; Place image files in the "textures" subfolder of your MilkDrop profile directory.
+; Uncomment and adjust a section such as [img00] to define a sprite for preset code.
+;
+; Example:
+; [img00]
+; img=textures\example.png
+; colorkey=0
+; init_1=x=0.5;
+; init_2=y=0.5;
+; code_1=rot=rot+0.01;
+)ini";
+    }
+
+    return R"ini(; MilkDrop custom message definitions.
+; Uncomment and adjust sections such as [font00] and [message00] below.
+;
+; Example:
+; [font00]
+; face=Segoe UI
+; bold=0
+; ital=0
+; r=255
+; g=255
+; b=255
+;
+; [message00]
+; text=Hello from MilkDrop
+; font=0
+; size=40
+; x=0.5
+; y=0.5
+; randx=0
+; randy=0
+; growth=1.0
+; time=1.5
+; fade=0.2
+)ini";
+}
+
+void ensure_edit_directories_exist()
+{
+    std::error_code ec;
+    if (default_szMilkdrop2Path[0] != L'\0')
+    {
+        std::filesystem::create_directories(default_szMilkdrop2Path, ec);
+        ec.clear();
+
+        auto texturePath = std::filesystem::path(default_szMilkdrop2Path) / L"textures";
+        std::filesystem::create_directories(texturePath, ec);
+    }
+}
+
+bool ensure_edit_template_exists(LPCWSTR filePath, LPCWSTR filename)
+{
+    std::error_code ec;
+    if (std::filesystem::exists(filePath, ec))
+        return !ec;
+    if (ec)
+        return false;
+
+    const auto path = std::filesystem::path(filePath);
+    const auto parent = path.parent_path();
+    if (!parent.empty())
+    {
+        std::filesystem::create_directories(parent, ec);
+        if (ec)
+            return false;
+    }
+
+    if (wcscmp(filename, IMG_INIFILE) == 0 && !parent.empty())
+    {
+        ec.clear();
+        std::filesystem::create_directories(parent / L"textures", ec);
+        if (ec)
+            return false;
+    }
+
+    const std::string_view content = get_default_edit_template(filename);
+    std::ofstream stream(path, std::ios::binary | std::ios::trunc);
+    if (!stream.is_open())
+        return false;
+
+    stream.write(content.data(), static_cast<std::streamsize>(content.size()));
+    return static_cast<bool>(stream);
+}
+
+std::wstring get_tooltip_text(UINT16 controlId, UINT16 resourceId)
+{
+    switch (controlId)
+    {
+        case ID_SPRITE:
+            return L"Click this button to edit 'milk2_img.ini', the file that defines custom sprites MilkDrop can invoke. If the file does not exist yet, MilkDrop will create a starter template.";
+        case ID_MSG:
+            return L"Click this button to edit 'milk2_msg.ini', the file that defines custom overlay messages. If the file does not exist yet, MilkDrop will create a starter template.";
+        case IDC_FORMAT_INFO:
+            return L"Show common foobar2000 title-formatting fields and build title/artwork display format strings.";
+        case ID_BLACKLIST:
+            return L"Edit the preset blacklist. Blacklisted preset filenames are skipped by the random and sequential preset pickers.";
+        case IDC_OPEN_MILKDROP_FOLDER:
+            return L"Open the MilkDrop profile folder containing presets, sprite/message INI files, and texture assets.";
+        case IDC_OPEN_TEXTURES_FOLDER:
+            return L"Open the MilkDrop textures folder used by sprite images and preset texture references.";
+        case IDC_RAND_MSG_LABEL:
+        case IDC_RAND_MSG:
+            return L"The mean (average) time, in seconds, between randomly launched custom messages from 'milk2_msg.ini'. Set to a negative value to disable random launching.";
+        default:
+            break;
+    }
+
+    wchar_t buf[256] = {0};
+    LoadString(core_api::get_my_instance(), resourceId, buf, 256);
+    return buf;
+}
+
 // clang-format off
 static cfg_bool cfg_bPresetLockOnAtStartup(guid_cfg_bPresetLockOnAtStartup, default_bPresetLockOnAtStartup);
 static cfg_bool cfg_bPreventScollLockHandling(guid_cfg_bPreventScollLockHandling, default_bPreventScollLockHandling);
@@ -41,6 +279,7 @@ static cfg_bool cfg_bShowAlbum(guid_cfg_bShowAlbum, default_bShowAlbum);
 static cfg_bool cfg_bEnableMouseWheelVolume(guid_cfg_bEnableMouseWheelVolume, default_bEnableMouseWheelVolume);
 static cfg_bool cfg_bEnableMouseClickPlayPause(guid_cfg_bEnableMouseClickPlayPause, default_bEnableMouseClickPlayPause);
 static cfg_bool cfg_bSeparateClickPromptFont(guid_cfg_bSeparateClickPromptFont, default_bSeparateClickPromptFont);
+static cfg_bool cfg_bPopoutBorderless(guid_cfg_bPopoutBorderless, default_bPopoutBorderless);
 static cfg_bool cfg_bEnableHDR(guid_cfg_bEnableHDR, default_bEnableHDR);
 static cfg_int cfg_max_fps_fs(guid_cfg_max_fps_fs, static_cast<int64_t>(default_max_fps_fs));
 static cfg_int cfg_n16BitGamma(guid_cfg_n16BitGamma, static_cast<int64_t>(default_n16BitGamma));
@@ -84,6 +323,7 @@ BOOL milk2_preferences_page::OnInitDialog(CWindow, LPARAM)
     int n = 0;
 
     m_dark.AddDialogWithControls(*this);
+    m_dark.AddGeneric(m_hWnd, L"Explorer");
 
     // Loose checkboxes.
     CheckDlgButton(IDC_CB_SCROLLON3, static_cast<UINT>(cfg_bPresetLockOnAtStartup));
@@ -94,6 +334,8 @@ BOOL milk2_preferences_page::OnInitDialog(CWindow, LPARAM)
     CheckDlgButton(IDC_CB_NOCOMPSHADER, static_cast<UINT>(cfg_bSkipCompShader));
     CheckDlgButton(IDC_CB_MOUSE_WHEEL_VOLUME, static_cast<UINT>(cfg_bEnableMouseWheelVolume));
     CheckDlgButton(IDC_CB_MOUSE_CLICK_PLAYPAUSE, static_cast<UINT>(cfg_bEnableMouseClickPlayPause));
+    CheckDlgButton(IDC_CB_POPOUT_BORDERLESS, static_cast<UINT>(cfg_bPopoutBorderless));
+    CheckDlgButton(IDC_CB_SEPARATE_CLICK_PROMPT_FONT, static_cast<UINT>(cfg_bSeparateClickPromptFont));
 
     // Maximum FPS.
     CheckDlgButton(IDC_CB_FSPT, static_cast<UINT>(cfg_allow_page_tearing_fs));
@@ -207,6 +449,12 @@ BOOL milk2_preferences_page::OnInitDialog(CWindow, LPARAM)
 
     CheckDlgButton(IDC_CB_AUTOGAMMA2, static_cast<UINT>(cfg_bAutoGamma));
     AutoHideGamma16();
+    ::ShowWindow(GetDlgItem(IDC_CB_SCROLLON4), SW_HIDE);
+    ::ShowWindow(GetDlgItem(IDC_CB_AUTOGAMMA2), SW_HIDE);
+    ::ShowWindow(GetDlgItem(IDC_SHADERS_CAPTION2), SW_HIDE);
+    ::ShowWindow(GetDlgItem(IDC_SHADERS), SW_HIDE);
+    ::ShowWindow(GetDlgItem(IDC_TEXSIZECOMBO_CAPTION), SW_HIDE);
+    ::ShowWindow(GetDlgItem(IDC_TEXSIZECOMBO), SW_HIDE);
 
     // Image cache maximum bytes.
     ctrl = GetDlgItem(IDC_MAX_BYTES2);
@@ -305,8 +553,11 @@ BOOL milk2_preferences_page::OnInitDialog(CWindow, LPARAM)
 
     // Push buttons.
     milk2_config::initialize_paths();
-    ::EnableWindow(GetDlgItem(ID_SPRITE), static_cast<BOOL>(std::filesystem::exists(default_szImgIniFile)));
-    ::EnableWindow(GetDlgItem(ID_MSG), static_cast<BOOL>(std::filesystem::exists(default_szMsgIniFile)));
+    ensure_edit_directories_exist();
+    ::EnableWindow(GetDlgItem(ID_SPRITE), static_cast<BOOL>(default_szImgIniFile[0] != L'\0'));
+    ::EnableWindow(GetDlgItem(ID_MSG), static_cast<BOOL>(default_szMsgIniFile[0] != L'\0'));
+    ::EnableWindow(GetDlgItem(IDC_OPEN_MILKDROP_FOLDER), static_cast<BOOL>(default_szMilkdrop2Path[0] != L'\0'));
+    ::EnableWindow(GetDlgItem(IDC_OPEN_TEXTURES_FOLDER), static_cast<BOOL>(default_szMilkdrop2Path[0] != L'\0'));
 
     // clang-format off
     const std::map<UINT16, UINT16> tips = {
@@ -342,16 +593,25 @@ BOOL milk2_preferences_page::OnInitDialog(CWindow, LPARAM)
         {(UINT16)ID_SPRITE, (UINT16)IDS_SPRITE},
         {(UINT16)ID_MSG, (UINT16)IDS_MSG},
         {(UINT16)ID_FONTS, (UINT16)IDS_FONTS_HELP},
+        {(UINT16)IDC_OPEN_MILKDROP_FOLDER, (UINT16)IDS_SPRITE},
+        {(UINT16)IDC_OPEN_TEXTURES_FOLDER, (UINT16)IDS_MAX_IMAGES_BYTES_HELP},
     };
     // clang-format on
     m_tooltips.Create(get_wnd(), nullptr, nullptr, TTS_ALWAYSTIP | TTS_NOANIMATE);
+    m_tooltip_texts.clear();
+    m_tooltip_texts.reserve(tips.size());
     for (const auto& tip : tips)
     {
-        LoadString(core_api::get_my_instance(), tip.second, buf, 256);
-        m_tooltips.AddTool(CToolInfo(TTF_IDISHWND | TTF_SUBCLASS, m_hWnd, (UINT_PTR)GetDlgItem(tip.first).m_hWnd, nullptr, (LPWSTR)buf));
+        m_tooltip_texts.emplace_back(get_tooltip_text(tip.first, tip.second));
+        m_tooltips.AddTool(CToolInfo(TTF_IDISHWND | TTF_SUBCLASS, m_hWnd, (UINT_PTR)GetDlgItem(tip.first).m_hWnd, nullptr, const_cast<LPWSTR>(m_tooltip_texts.back().c_str())));
     }
     m_tooltips.SetMaxTipWidth(200);
-    SetWindowTheme(m_tooltips, m_dark ? L"DarkMode_Explorer" : nullptr, nullptr);
+    SetWindowTheme(m_tooltips, m_dark ? L"DarkMode_Explorer" : L"Explorer", nullptr);
+    SetWindowTheme(m_hWnd, m_dark ? L"DarkMode_Explorer" : L"Explorer", nullptr);
+    SetWindowTheme(GetDlgItem(IDC_PREFS_SCROLLBAR), m_dark ? L"DarkMode_Explorer" : L"Explorer", nullptr);
+
+    CapturePreferencesControlLayout();
+    UpdatePreferencesScrollBar();
 
     return FALSE;
 }
@@ -398,7 +658,546 @@ void milk2_preferences_page::OnButtonPushed(UINT uNotifyCode, int nID, CWindow w
                 if (ret == IDOK/* && HasChanged()*/) {}
             }
             break;
+        case ID_BLACKLIST:
+            {
+                PresetBlacklistDlg dlg;
+                dlg.DoModal(core_api::get_main_window());
+                if (dlg.HasChanges() && ::IsWindow(g_hWindow))
+                    ::PostMessage(g_hWindow, WM_MILK2, MILK2_WPARAM_REFRESH_PRESET_LIST, 0);
+            }
+            break;
+        case IDC_FORMAT_INFO:
+            {
+                FormatInfoDlg dlg(get_wnd());
+                dlg.DoModal(get_wnd());
+            }
+            break;
+        case IDC_OPEN_MILKDROP_FOLDER:
+            milk2_config::initialize_paths();
+            ensure_edit_directories_exist();
+            OpenDirectory(default_szMilkdrop2Path, L"MilkDrop Folder");
+            break;
+        case IDC_OPEN_TEXTURES_FOLDER:
+            {
+                milk2_config::initialize_paths();
+                ensure_edit_directories_exist();
+                const auto texturePath = std::filesystem::path(default_szMilkdrop2Path) / L"textures";
+                OpenDirectory(texturePath.c_str(), L"Textures Folder");
+            }
+            break;
     }
+}
+
+BOOL FormatInfoDlg::OnInitDialog(CWindow, LPARAM)
+{
+    m_dark.AddDialogWithControls(*this);
+    LOGFONT lf = {};
+    HFONT baseFont = GetFont();
+    if (!baseFont)
+        baseFont = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+    if (baseFont && GetObject(baseFont, sizeof(lf), &lf) == sizeof(lf))
+    {
+        LOGFONT monoLf = lf;
+        wcscpy_s(monoLf.lfFaceName, LF_FACESIZE, L"Consolas");
+        monoLf.lfWeight = FW_NORMAL;
+        monoLf.lfPitchAndFamily = FIXED_PITCH | FF_MODERN;
+        m_monospace_font = CreateFontIndirect(&monoLf);
+
+        lf.lfWeight = FW_BOLD;
+        m_header_font = CreateFontIndirect(&lf);
+    }
+    if (m_header_font)
+    {
+        GetDlgItem(IDC_TITLE_FORMAT_LABEL).SetFont(m_header_font, TRUE);
+        GetDlgItem(IDC_FORMAT_INFO_EXAMPLES_LABEL).SetFont(m_header_font, TRUE);
+        GetDlgItem(IDC_FORMAT_INFO_COMMON_LABEL).SetFont(m_header_font, TRUE);
+        GetDlgItem(IDC_ARTWORK_FORMAT_LABEL).SetFont(m_header_font, TRUE);
+    }
+    if (m_monospace_font)
+    {
+        GetDlgItem(IDC_FORMAT_INFO_EXAMPLES_TEXT).SetFont(m_monospace_font, TRUE);
+        GetDlgItem(IDC_FORMAT_INFO_EXAMPLE_2_TEXT).SetFont(m_monospace_font, TRUE);
+        GetDlgItem(IDC_FORMAT_INFO_COMMON_TEXT).SetFont(m_monospace_font, TRUE);
+        GetDlgItem(IDC_FORMAT_INFO_BUILDER_TEXT).SetFont(m_monospace_font, TRUE);
+    }
+    const int copyableControls[] = {
+        IDC_FORMAT_INFO_TITLE_TEXT,
+        IDC_FORMAT_INFO_EXAMPLES_TEXT,
+        IDC_FORMAT_INFO_EXAMPLE_2_TEXT,
+        IDC_FORMAT_INFO_COMMON_TEXT,
+        IDC_FORMAT_INFO_ARTWORK_TEXT,
+        IDC_FORMAT_INFO_BUILDER_TEXT,
+    };
+    for (int id : copyableControls)
+    {
+        CWindow control = GetDlgItem(id);
+        if (control)
+        {
+            control.SendMessage(EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(0, 0));
+            control.SendMessage(EM_SETSEL, 0, 0);
+        }
+    }
+    CWindow fieldCombo = GetDlgItem(IDC_FORMAT_INFO_FIELD_COMBO);
+    for (const auto& entry : g_format_field_entries)
+    {
+        const int index = static_cast<int>(fieldCombo.SendMessage(CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(entry.label)));
+        fieldCombo.SendMessage(CB_SETITEMDATA, index, reinterpret_cast<LPARAM>(entry.token));
+    }
+    fieldCombo.SendMessage(CB_SETCURSEL, 0, 0);
+    fieldCombo.SetFocus();
+    CenterWindow(GetParent());
+    return FALSE;
+}
+
+void FormatInfoDlg::OnDestroy()
+{
+    if (m_header_font)
+    {
+        DeleteObject(m_header_font);
+        m_header_font = nullptr;
+    }
+    if (m_monospace_font)
+    {
+        DeleteObject(m_monospace_font);
+        m_monospace_font = nullptr;
+    }
+    m_dark.clear();
+}
+
+void FormatInfoDlg::OnBuildCmd(UINT, int nID, CWindow)
+{
+    const auto appendBuilderText = [&](const wchar_t* text) {
+        if (!text)
+            return;
+
+        std::wstring builderText = get_window_text(GetDlgItem(IDC_FORMAT_INFO_BUILDER_TEXT));
+        builderText += text;
+        SetDlgItemText(IDC_FORMAT_INFO_BUILDER_TEXT, builderText.c_str());
+    };
+
+    const auto applyBuilderTo = [&](int controlId) {
+        if (!m_preferences_wnd)
+            return;
+
+        std::wstring builderText = get_window_text(GetDlgItem(IDC_FORMAT_INFO_BUILDER_TEXT));
+        ::SetDlgItemText(m_preferences_wnd, controlId, builderText.c_str());
+        EndDialog(IDOK);
+    };
+
+    switch (nID)
+    {
+        case IDC_FORMAT_INFO_LOAD_EXAMPLE_1:
+            SetDlgItemText(IDC_FORMAT_INFO_BUILDER_TEXT, g_format_example_1);
+            break;
+        case IDC_FORMAT_INFO_LOAD_EXAMPLE_2:
+            SetDlgItemText(IDC_FORMAT_INFO_BUILDER_TEXT, g_format_example_2);
+            break;
+        case IDC_FORMAT_INFO_ADD_FIELD:
+            {
+                CWindow fieldCombo = GetDlgItem(IDC_FORMAT_INFO_FIELD_COMBO);
+                const LRESULT selection = fieldCombo.SendMessage(CB_GETCURSEL, 0, 0);
+                if (selection != CB_ERR)
+                {
+                    const auto token = reinterpret_cast<const wchar_t*>(fieldCombo.SendMessage(CB_GETITEMDATA, selection, 0));
+                    appendBuilderText(token);
+                }
+            }
+            break;
+        case IDC_FORMAT_INFO_ADD_CRLF:
+            appendBuilderText(L"$crlf()");
+            break;
+        case IDC_FORMAT_INFO_CLEAR_BUILDER:
+            SetDlgItemText(IDC_FORMAT_INFO_BUILDER_TEXT, L"");
+            break;
+        case IDC_FORMAT_INFO_COPY_BUILDER:
+            copy_text_to_clipboard(m_hWnd, get_window_text(GetDlgItem(IDC_FORMAT_INFO_BUILDER_TEXT)).c_str());
+            break;
+        case IDC_FORMAT_INFO_USE_TITLE:
+            applyBuilderTo(IDC_TITLE_FORMAT);
+            break;
+        case IDC_FORMAT_INFO_USE_ARTWORK:
+            applyBuilderTo(IDC_ARTWORK_FORMAT);
+            break;
+        default:
+            break;
+    }
+}
+
+void FormatInfoDlg::OnCloseCmd(UINT, int nID, CWindow)
+{
+    EndDialog(nID);
+}
+
+BOOL PresetBlacklistDlg::OnInitDialog(CWindow, LPARAM)
+{
+    m_dark.AddDialogWithControls(*this);
+    ApplyEntryPlaceholder();
+    RefreshList();
+    UpdateButtons();
+    CenterWindow(GetParent());
+    return TRUE;
+}
+
+void PresetBlacklistDlg::OnDestroy()
+{
+    if (m_entry_placeholder_font)
+    {
+        DeleteObject(m_entry_placeholder_font);
+        m_entry_placeholder_font = nullptr;
+    }
+    m_dark.clear();
+}
+
+LRESULT PresetBlacklistDlg::OnCtlColorEdit(UINT, WPARAM wParam, LPARAM lParam)
+{
+    if (reinterpret_cast<HWND>(lParam) == GetDlgItem(IDC_BLACKLIST_ENTRY).m_hWnd && m_entry_placeholder_active)
+    {
+        HDC hdc = reinterpret_cast<HDC>(wParam);
+        const COLORREF background = GetSysColor(COLOR_WINDOW);
+        SetTextColor(hdc, RGB(150, 150, 150));
+        SetBkColor(hdc, background);
+        SetDCBrushColor(hdc, background);
+        return reinterpret_cast<LRESULT>(GetStockObject(DC_BRUSH));
+    }
+
+    SetMsgHandled(FALSE);
+    return 0;
+}
+
+void PresetBlacklistDlg::OnCloseCmd(UINT, int nID, CWindow)
+{
+    EndDialog(nID);
+}
+
+void PresetBlacklistDlg::OnAdd(UINT, int, CWindow)
+{
+    wchar_t entry[512] = {0};
+    if (!m_entry_placeholder_active)
+        GetDlgItemText(IDC_BLACKLIST_ENTRY, entry, static_cast<int>(std::size(entry)));
+
+    if (CPlugin::NormalizePresetBlacklistEntry(entry).empty())
+    {
+        std::vector<wchar_t> selectedPaths(65536);
+        OPENFILENAME ofn = {};
+        ofn.lStructSize = sizeof(ofn);
+        ofn.hwndOwner = *this;
+        ofn.lpstrFilter = L"MilkDrop Presets (*.milk)\0*.milk\0All Files (*.*)\0*.*\0";
+        ofn.lpstrFile = selectedPaths.data();
+        ofn.nMaxFile = static_cast<DWORD>(selectedPaths.size());
+        ofn.lpstrInitialDir = g_plugin.GetPresetDir();
+        ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY | OFN_ALLOWMULTISELECT | OFN_EXPLORER;
+        ofn.lpstrDefExt = L"milk";
+
+        if (!GetOpenFileName(&ofn))
+            return;
+
+        std::vector<std::wstring> merged = g_plugin.GetPresetBlacklist();
+        size_t added = 0;
+        const wchar_t* cursor = selectedPaths.data();
+        std::wstring first = cursor;
+        cursor += first.size() + 1;
+
+        auto addEntry = [&](const std::wstring& value) {
+            std::wstring normalized = CPlugin::NormalizePresetBlacklistEntry(value);
+            if (normalized.empty())
+                return;
+
+            const bool duplicate = std::any_of(merged.begin(), merged.end(), [&normalized](const std::wstring& existing) {
+                return _wcsicmp(existing.c_str(), normalized.c_str()) == 0;
+            });
+            if (!duplicate)
+            {
+                merged.push_back(normalized);
+                added++;
+            }
+        };
+
+        if (*cursor == L'\0')
+        {
+            addEntry(first);
+        }
+        else
+        {
+            while (*cursor)
+            {
+                addEntry(cursor);
+                cursor += wcslen(cursor) + 1;
+            }
+        }
+
+        if (added == 0)
+            return;
+
+        if (!g_plugin.SetPresetBlacklist(merged))
+        {
+            MessageBox(L"Could not save the updated blacklist.", L"Preset Blacklist", MB_ICONERROR);
+            return;
+        }
+
+        m_changed = true;
+    }
+    else
+    {
+        if (!g_plugin.AddPresetToBlacklist(entry))
+            return;
+
+        m_changed = true;
+    }
+
+    if (::IsWindow(g_hWindow) && g_plugin.IsPresetBlacklisted(g_plugin.GetCurrentPresetFilename()))
+        ::PostMessage(g_hWindow, WM_MILK2, MILK2_WPARAM_RANDOM_PRESET, 0);
+
+    SetDlgItemText(IDC_BLACKLIST_ENTRY, L"");
+    ApplyEntryPlaceholder();
+    RefreshList();
+    UpdateButtons();
+}
+
+void PresetBlacklistDlg::OnRemove(UINT, int, CWindow)
+{
+    const int selectionCount = static_cast<int>(SendDlgItemMessage(IDC_BLACKLIST_LIST, LB_GETSELCOUNT, 0, 0));
+    if (selectionCount <= 0)
+        return;
+
+    std::vector<int> selectedIndices(selectionCount);
+    const int selectedItems = static_cast<int>(
+        SendDlgItemMessage(IDC_BLACKLIST_LIST, LB_GETSELITEMS, selectionCount, reinterpret_cast<LPARAM>(selectedIndices.data())));
+    if (selectedItems <= 0)
+        return;
+
+    selectedIndices.resize(selectedItems);
+
+    std::vector<std::wstring> selectedEntries;
+    selectedEntries.reserve(selectedIndices.size());
+    for (const int index : selectedIndices)
+    {
+        wchar_t entry[512] = {0};
+        SendDlgItemMessage(IDC_BLACKLIST_LIST, LB_GETTEXT, index, reinterpret_cast<LPARAM>(entry));
+
+        std::wstring normalized = CPlugin::NormalizePresetBlacklistEntry(entry);
+        if (!normalized.empty())
+            selectedEntries.push_back(std::move(normalized));
+    }
+
+    if (selectedEntries.empty())
+        return;
+
+    std::vector<std::wstring> blacklist = g_plugin.GetPresetBlacklist();
+    const size_t originalSize = blacklist.size();
+    blacklist.erase(std::remove_if(blacklist.begin(), blacklist.end(), [&selectedEntries](const std::wstring& entry) {
+        return std::any_of(selectedEntries.begin(), selectedEntries.end(), [&entry](const std::wstring& selected) {
+            return _wcsicmp(entry.c_str(), selected.c_str()) == 0;
+        });
+    }), blacklist.end());
+
+    if (blacklist.size() == originalSize)
+        return;
+
+    if (!g_plugin.SetPresetBlacklist(blacklist))
+    {
+        MessageBox(L"Could not save the updated blacklist.", L"Preset Blacklist", MB_ICONERROR);
+        return;
+    }
+
+    m_changed = true;
+    RefreshList();
+    UpdateButtons();
+}
+
+void PresetBlacklistDlg::OnOpenLocation(UINT, int, CWindow)
+{
+    int index = LB_ERR;
+    const int selectionCount = static_cast<int>(SendDlgItemMessage(IDC_BLACKLIST_LIST, LB_GETSELCOUNT, 0, 0));
+    if (selectionCount > 0)
+    {
+        std::vector<int> selectedIndices(selectionCount);
+        const int selectedItems = static_cast<int>(
+            SendDlgItemMessage(IDC_BLACKLIST_LIST, LB_GETSELITEMS, selectionCount, reinterpret_cast<LPARAM>(selectedIndices.data())));
+        if (selectedItems > 0)
+            index = selectedIndices.front();
+    }
+
+    if (index == LB_ERR)
+        return;
+
+    wchar_t entry[512] = {0};
+    SendDlgItemMessage(IDC_BLACKLIST_LIST, LB_GETTEXT, index, reinterpret_cast<LPARAM>(entry));
+    std::wstring presetPath = g_plugin.GetPresetDir();
+    presetPath += entry;
+    std::wstring arguments = L"/select,\"" + presetPath + L"\"";
+    ShellExecute(*this, L"open", L"explorer.exe", arguments.c_str(), nullptr, SW_SHOWNORMAL);
+}
+
+void PresetBlacklistDlg::OnOpenPresetDirectory(UINT, int, CWindow)
+{
+    ShellExecute(*this, L"open", g_plugin.GetPresetDir(), nullptr, g_plugin.GetPresetDir(), SW_SHOWNORMAL);
+}
+
+void PresetBlacklistDlg::OnImport(UINT, int, CWindow)
+{
+    wchar_t selectedPath[MAX_PATH] = {0};
+    OPENFILENAME ofn = {};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = *this;
+    ofn.lpstrFilter = L"Text Files (*.txt)\0*.txt\0All Files (*.*)\0*.*\0";
+    ofn.lpstrFile = selectedPath;
+    ofn.nMaxFile = static_cast<DWORD>(std::size(selectedPath));
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY;
+    ofn.lpstrDefExt = L"txt";
+
+    if (!GetOpenFileName(&ofn))
+        return;
+
+    FILE* file = nullptr;
+    errno_t err = _wfopen_s(&file, selectedPath, L"rt, ccs=UTF-8");
+    if (err != 0 || !file)
+    {
+        MessageBox(L"Could not open the selected blacklist file.", L"Import Blacklist", MB_ICONERROR);
+        return;
+    }
+
+    std::vector<std::wstring> merged = g_plugin.GetPresetBlacklist();
+    size_t imported = 0;
+    wchar_t line[1024] = {0};
+    while (fgetws(line, static_cast<int>(std::size(line)), file))
+    {
+        std::wstring entry = CPlugin::NormalizePresetBlacklistEntry(line);
+        if (entry.empty())
+            continue;
+
+        const bool duplicate = std::any_of(merged.begin(), merged.end(), [&entry](const std::wstring& existing) {
+            return _wcsicmp(existing.c_str(), entry.c_str()) == 0;
+        });
+        if (!duplicate)
+        {
+            merged.push_back(entry);
+            imported++;
+        }
+    }
+    fclose(file);
+
+    if (imported == 0)
+    {
+        MessageBox(L"No new preset names were found in the selected file.", L"Import Blacklist", MB_ICONINFORMATION);
+        return;
+    }
+
+    if (!g_plugin.SetPresetBlacklist(merged))
+    {
+        MessageBox(L"Could not save the updated blacklist.", L"Import Blacklist", MB_ICONERROR);
+        return;
+    }
+
+    m_changed = true;
+    RefreshList();
+    UpdateButtons();
+}
+
+void PresetBlacklistDlg::OnExport(UINT, int, CWindow)
+{
+    wchar_t selectedPath[MAX_PATH] = L"preset-blacklist.txt";
+    OPENFILENAME ofn = {};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = *this;
+    ofn.lpstrFilter = L"Text Files (*.txt)\0*.txt\0All Files (*.*)\0*.*\0";
+    ofn.lpstrFile = selectedPath;
+    ofn.nMaxFile = static_cast<DWORD>(std::size(selectedPath));
+    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY;
+    ofn.lpstrDefExt = L"txt";
+
+    if (!GetSaveFileName(&ofn))
+        return;
+
+    FILE* file = nullptr;
+    errno_t err = _wfopen_s(&file, selectedPath, L"wt, ccs=UTF-8");
+    if (err != 0 || !file)
+    {
+        MessageBox(L"Could not create the selected blacklist file.", L"Export Blacklist", MB_ICONERROR);
+        return;
+    }
+
+    const auto blacklist = g_plugin.GetPresetBlacklist();
+    for (const auto& entry : blacklist)
+    {
+        if (!entry.empty())
+            fwprintf(file, L"%ls\n", entry.c_str());
+    }
+    fclose(file);
+}
+
+void PresetBlacklistDlg::OnEntryChanged(UINT, int, CWindow)
+{
+    UpdateButtons();
+}
+
+void PresetBlacklistDlg::OnEntrySetFocus(UINT, int, CWindow)
+{
+    ClearEntryPlaceholder();
+}
+
+void PresetBlacklistDlg::OnEntryKillFocus(UINT, int, CWindow)
+{
+    ApplyEntryPlaceholder();
+}
+
+void PresetBlacklistDlg::ApplyEntryPlaceholder()
+{
+    if (m_entry_placeholder_active)
+        return;
+
+    wchar_t entry[512] = {0};
+    GetDlgItemText(IDC_BLACKLIST_ENTRY, entry, static_cast<int>(std::size(entry)));
+    if (entry[0] != L'\0')
+        return;
+
+    m_entry_placeholder_active = true;
+    CWindow entryControl = GetDlgItem(IDC_BLACKLIST_ENTRY);
+    if (!m_entry_placeholder_font)
+    {
+        LOGFONT lf = {};
+        HFONT baseFont = GetFont();
+        if (!baseFont)
+            baseFont = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+        if (baseFont && GetObject(baseFont, sizeof(lf), &lf) == sizeof(lf))
+        {
+            lf.lfItalic = TRUE;
+            m_entry_placeholder_font = CreateFontIndirect(&lf);
+        }
+    }
+    if (m_entry_placeholder_font)
+        entryControl.SetFont(m_entry_placeholder_font, TRUE);
+    SetDlgItemText(IDC_BLACKLIST_ENTRY, L"example.milk");
+}
+
+void PresetBlacklistDlg::ClearEntryPlaceholder()
+{
+    if (!m_entry_placeholder_active)
+        return;
+
+    m_entry_placeholder_active = false;
+    GetDlgItem(IDC_BLACKLIST_ENTRY).SetFont(GetFont(), TRUE);
+    SetDlgItemText(IDC_BLACKLIST_ENTRY, L"");
+}
+
+void PresetBlacklistDlg::OnListSelectionChanged(UINT, int, CWindow)
+{
+    UpdateButtons();
+}
+
+void PresetBlacklistDlg::RefreshList()
+{
+    const auto blacklist = g_plugin.GetPresetBlacklist();
+    SendDlgItemMessage(IDC_BLACKLIST_LIST, LB_RESETCONTENT, 0, 0);
+    for (const auto& entry : blacklist)
+        SendDlgItemMessage(IDC_BLACKLIST_LIST, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(entry.c_str()));
+}
+
+void PresetBlacklistDlg::UpdateButtons()
+{
+    const bool hasSelection = static_cast<int>(SendDlgItemMessage(IDC_BLACKLIST_LIST, LB_GETSELCOUNT, 0, 0)) > 0;
+    ::EnableWindow(GetDlgItem(IDC_BLACKLIST_ADD), TRUE);
+    ::EnableWindow(GetDlgItem(IDC_BLACKLIST_REMOVE), static_cast<BOOL>(hasSelection));
+    ::EnableWindow(GetDlgItem(IDC_BLACKLIST_OPEN), static_cast<BOOL>(hasSelection));
 }
 
 void milk2_preferences_page::OnEditNotification(UINT uNotifyCode, int nID, CWindow wndCtl)
@@ -454,6 +1253,90 @@ void milk2_preferences_page::OnHScroll(UINT nSBCode, UINT nPos, CScrollBar pScro
     }
 }
 
+void milk2_preferences_page::OnVScroll(UINT nSBCode, UINT nPos, CScrollBar pScrollBar)
+{
+    UNREFERENCED_PARAMETER(nPos);
+
+    const bool childScrollBar = pScrollBar.IsWindow();
+    if (childScrollBar && pScrollBar.GetDlgCtrlID() != IDC_PREFS_SCROLLBAR)
+        return;
+
+    SCROLLINFO info = {};
+    info.cbSize = sizeof(info);
+    info.fMask = SIF_ALL;
+    if (childScrollBar)
+        pScrollBar.GetScrollInfo(&info);
+    else
+        GetScrollInfo(SB_VERT, &info);
+
+    constexpr int lineDelta = 24;
+    const int pageDelta = std::max(lineDelta, static_cast<int>(info.nPage) - lineDelta);
+    int target = m_preferences_scroll_pos;
+
+    switch (nSBCode)
+    {
+        case SB_TOP:
+            target = 0;
+            break;
+        case SB_BOTTOM:
+            target = GetPreferencesScrollMax();
+            break;
+        case SB_LINEUP:
+            target -= lineDelta;
+            break;
+        case SB_LINEDOWN:
+            target += lineDelta;
+            break;
+        case SB_PAGEUP:
+            target -= pageDelta;
+            break;
+        case SB_PAGEDOWN:
+            target += pageDelta;
+            break;
+        case SB_THUMBPOSITION:
+        case SB_THUMBTRACK:
+            target = info.nTrackPos;
+            break;
+        default:
+            return;
+    }
+
+    ScrollPreferencesTo(target);
+}
+
+BOOL milk2_preferences_page::OnMouseWheel(UINT nFlags, short zDelta, CPoint pt)
+{
+    UNREFERENCED_PARAMETER(nFlags);
+    UNREFERENCED_PARAMETER(pt);
+
+    constexpr int lineDelta = 24;
+    const int scrollMax = GetPreferencesScrollMax();
+    if (scrollMax <= 0)
+        return FALSE;
+
+    UINT wheelLines = 3;
+    SystemParametersInfo(SPI_GETWHEELSCROLLLINES, 0, &wheelLines, 0);
+
+    RECT rc = {};
+    GetClientRect(&rc);
+    const int clientHeight = rc.bottom - rc.top;
+    const int pageDelta = std::max(lineDelta, clientHeight - lineDelta);
+    const int direction = zDelta > 0 ? -1 : 1;
+    const int notches = std::max(1, std::abs(static_cast<int>(zDelta)) / WHEEL_DELTA);
+    const int delta = wheelLines == WHEEL_PAGESCROLL ? pageDelta : static_cast<int>(wheelLines) * lineDelta;
+
+    ScrollPreferencesTo(m_preferences_scroll_pos + direction * notches * delta);
+    return TRUE;
+}
+
+void milk2_preferences_page::OnSize(UINT nType, CSize size)
+{
+    UNREFERENCED_PARAMETER(nType);
+    UNREFERENCED_PARAMETER(size);
+
+    UpdatePreferencesScrollBar();
+}
+
 void milk2_preferences_page::AutoHideGamma16()
 {
     bool bAutoGamma = static_cast<bool>(IsDlgButtonChecked(IDC_CB_AUTOGAMMA2));
@@ -464,6 +1347,143 @@ void milk2_preferences_page::AutoHideGamma16()
     ::ShowWindow(GetDlgItem(IDC_GAMMA16_2), static_cast<UINT>(!bAutoGamma));
     ::ShowWindow(GetDlgItem(IDC_GAMMA16_3), static_cast<UINT>(!bAutoGamma));
     ::ShowWindow(GetDlgItem(IDC_GAMMA16_4), static_cast<UINT>(!bAutoGamma));
+    UpdatePreferencesScrollBar();
+}
+
+void milk2_preferences_page::CapturePreferencesControlLayout()
+{
+    m_preference_control_layout.clear();
+    for (HWND child = ::GetWindow(m_hWnd, GW_CHILD); child; child = ::GetWindow(child, GW_HWNDNEXT))
+    {
+        if (::GetDlgCtrlID(child) == IDC_PREFS_SCROLLBAR)
+            continue;
+
+        RECT rect = {};
+        if (!::GetWindowRect(child, &rect))
+            continue;
+
+        ::MapWindowPoints(HWND_DESKTOP, m_hWnd, reinterpret_cast<POINT*>(&rect), 2);
+        m_preference_control_layout.emplace_back(child, rect);
+    }
+}
+
+void milk2_preferences_page::RepositionPreferencesControls()
+{
+    HDWP defer = ::BeginDeferWindowPos(static_cast<int>(m_preference_control_layout.size()));
+    for (const auto& item : m_preference_control_layout)
+    {
+        const HWND child = item.first;
+        if (!::IsWindow(child))
+            continue;
+
+        const RECT& rect = item.second;
+        const int x = rect.left;
+        const int y = rect.top - m_preferences_scroll_pos;
+        const int width = rect.right - rect.left;
+        const int height = rect.bottom - rect.top;
+
+        if (defer)
+            defer = ::DeferWindowPos(defer, child, nullptr, x, y, width, height, SWP_NOACTIVATE | SWP_NOZORDER);
+        else
+            ::SetWindowPos(child, nullptr, x, y, width, height, SWP_NOACTIVATE | SWP_NOZORDER);
+    }
+
+    if (defer)
+        ::EndDeferWindowPos(defer);
+
+    RedrawWindow(nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
+}
+
+int milk2_preferences_page::GetPreferencesContentHeight() const
+{
+    int contentHeight = 0;
+    for (const auto& item : m_preference_control_layout)
+    {
+        const HWND child = item.first;
+        if (!::IsWindow(child))
+            continue;
+
+        const auto style = static_cast<DWORD_PTR>(::GetWindowLongPtr(child, GWL_STYLE));
+        if ((style & WS_VISIBLE) == 0)
+            continue;
+
+        contentHeight = std::max(contentHeight, static_cast<int>(item.second.bottom));
+    }
+
+    return contentHeight + 10;
+}
+
+int milk2_preferences_page::GetPreferencesScrollMax() const
+{
+    RECT rect = {};
+    GetClientRect(&rect);
+    const int clientHeight = rect.bottom - rect.top;
+    if (clientHeight <= 0)
+        return 0;
+
+    return std::max(0, GetPreferencesContentHeight() - clientHeight);
+}
+
+void milk2_preferences_page::PositionPreferencesScrollBar(bool visible)
+{
+    CWindow scrollBar = GetDlgItem(IDC_PREFS_SCROLLBAR);
+    if (!scrollBar.IsWindow())
+        return;
+
+    RECT rect = {};
+    GetClientRect(&rect);
+    const int width = std::max(1, GetSystemMetrics(SM_CXVSCROLL));
+    const int height = std::max(0, static_cast<int>(rect.bottom - rect.top));
+    ::SetWindowPos(scrollBar.m_hWnd,
+                   HWND_TOP,
+                   std::max(0, static_cast<int>(rect.right) - width),
+                   0,
+                   width,
+                   height,
+                   SWP_NOACTIVATE | (visible ? SWP_SHOWWINDOW : SWP_HIDEWINDOW));
+}
+
+void milk2_preferences_page::UpdatePreferencesScrollBar()
+{
+    RECT rect = {};
+    GetClientRect(&rect);
+    const int clientHeight = rect.bottom - rect.top;
+    const int contentHeight = GetPreferencesContentHeight();
+    const int maxScroll = std::max(0, contentHeight - clientHeight);
+
+    if (m_preferences_scroll_pos > maxScroll)
+    {
+        m_preferences_scroll_pos = maxScroll;
+        RepositionPreferencesControls();
+    }
+
+    SCROLLINFO info = {};
+    info.cbSize = sizeof(info);
+    info.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
+    info.nMin = 0;
+    info.nMax = std::max(0, contentHeight - 1);
+    info.nPage = static_cast<UINT>(std::max(0, clientHeight));
+    info.nPos = m_preferences_scroll_pos;
+    CWindow scrollBar = GetDlgItem(IDC_PREFS_SCROLLBAR);
+    if (scrollBar.IsWindow())
+        ::SetScrollInfo(scrollBar.m_hWnd, SB_CTL, &info, TRUE);
+    PositionPreferencesScrollBar(maxScroll > 0);
+}
+
+void milk2_preferences_page::ScrollPreferencesTo(int scrollPos)
+{
+    const int target = std::clamp(scrollPos, 0, GetPreferencesScrollMax());
+    if (target == m_preferences_scroll_pos)
+        return;
+
+    m_preferences_scroll_pos = target;
+    RepositionPreferencesControls();
+
+    CWindow scrollBar = GetDlgItem(IDC_PREFS_SCROLLBAR);
+    if (scrollBar.IsWindow())
+        ::SetScrollPos(scrollBar.m_hWnd, SB_CTL, m_preferences_scroll_pos, TRUE);
+    PositionPreferencesScrollBar(GetPreferencesScrollMax() > 0);
+    RedrawWindow(nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
 }
 
 uint32_t milk2_preferences_page::get_state()
@@ -488,6 +1508,8 @@ void milk2_preferences_page::reset()
     CheckDlgButton(IDC_CB_NOCOMPSHADER, static_cast<UINT>(default_bSkipCompShader));
     CheckDlgButton(IDC_CB_MOUSE_WHEEL_VOLUME, static_cast<UINT>(default_bEnableMouseWheelVolume));
     CheckDlgButton(IDC_CB_MOUSE_CLICK_PLAYPAUSE, static_cast<UINT>(default_bEnableMouseClickPlayPause));
+    CheckDlgButton(IDC_CB_POPOUT_BORDERLESS, static_cast<UINT>(default_bPopoutBorderless));
+    CheckDlgButton(IDC_CB_SEPARATE_CLICK_PROMPT_FONT, static_cast<UINT>(default_bSeparateClickPromptFont));
 
     CheckDlgButton(IDC_CB_FSPT, static_cast<UINT>(default_allow_page_tearing_fs));
     UpdateMaxFps(FULLSCREEN);
@@ -560,6 +1582,8 @@ void milk2_preferences_page::apply()
     cfg_bSkipCompShader = static_cast<bool>(IsDlgButtonChecked(IDC_CB_NOCOMPSHADER));
     cfg_bEnableMouseWheelVolume = static_cast<bool>(IsDlgButtonChecked(IDC_CB_MOUSE_WHEEL_VOLUME));
     cfg_bEnableMouseClickPlayPause = static_cast<bool>(IsDlgButtonChecked(IDC_CB_MOUSE_CLICK_PLAYPAUSE));
+    cfg_bPopoutBorderless = static_cast<bool>(IsDlgButtonChecked(IDC_CB_POPOUT_BORDERLESS));
+    cfg_bSeparateClickPromptFont = static_cast<bool>(IsDlgButtonChecked(IDC_CB_SEPARATE_CLICK_PROMPT_FONT));
 
     cfg_allow_page_tearing_fs = static_cast<bool>(IsDlgButtonChecked(IDC_CB_FSPT));
     SaveMaxFps(FULLSCREEN);
@@ -663,6 +1687,8 @@ bool milk2_preferences_page::HasChanged() const
                             (static_cast<bool>(IsDlgButtonChecked(IDC_CB_NOCOMPSHADER)) != cfg_bSkipCompShader) ||
                             (static_cast<bool>(IsDlgButtonChecked(IDC_CB_MOUSE_WHEEL_VOLUME)) != cfg_bEnableMouseWheelVolume) ||
                             (static_cast<bool>(IsDlgButtonChecked(IDC_CB_MOUSE_CLICK_PLAYPAUSE)) != cfg_bEnableMouseClickPlayPause) ||
+                            (static_cast<bool>(IsDlgButtonChecked(IDC_CB_POPOUT_BORDERLESS)) != cfg_bPopoutBorderless) ||
+                            (static_cast<bool>(IsDlgButtonChecked(IDC_CB_SEPARATE_CLICK_PROMPT_FONT)) != cfg_bSeparateClickPromptFont) ||
                             (static_cast<bool>(IsDlgButtonChecked(IDC_CB_FSPT)) != cfg_allow_page_tearing_fs) ||
                             (static_cast<bool>(IsDlgButtonChecked(IDC_CB_HARDCUTS)) != cfg_bHardCutsDisabled) ||
                             (static_cast<bool>(IsDlgButtonChecked(IDC_CB_AUTOGAMMA2)) != cfg_bAutoGamma) ||
@@ -672,9 +1698,7 @@ bool milk2_preferences_page::HasChanged() const
     LRESULT n = SendMessage(GetDlgItem(IDC_FS_MAXFPS2), CB_GETCURSEL, (WPARAM)0, (LPARAM)0);
     if (n != CB_ERR)
     {
-        if (n > 0)
-            n = MAX_MAX_FPS + 1 - n;
-        combobox_changes = combobox_changes || (static_cast<UINT>(n) != cfg_max_fps_fs);
+        combobox_changes = combobox_changes || (max_fps_from_combo_index(n) != sanitize_max_fps(static_cast<UINT>(cfg_max_fps_fs)));
     }
     combobox_changes = combobox_changes ||
                        IsComboDiff(IDC_SHADERS, cfg_nMaxPSVersion) ||
@@ -822,18 +1846,13 @@ void milk2_preferences_page::UpdateMaxFps(int screenmode) const
         return;
 
     SendMessage(ctrl, CB_RESETCONTENT, (WPARAM)0, (LPARAM)0);
-    for (int j = 0; j <= MAX_MAX_FPS; ++j)
+    for (size_t j = 0; j < supported_max_fps_count; ++j)
     {
         WCHAR buf[256];
-        if (j == 0)
-            LoadString(core_api::get_my_instance(), IDS_UNLIMITED, buf, 256);
-        else
-        {
-            LoadString(core_api::get_my_instance(), IDS_X_FPS, buf, 256);
-            swprintf_s(buf, buf, MAX_MAX_FPS + 1 - j);
-        }
+        LoadString(core_api::get_my_instance(), IDS_X_FPS, buf, 256);
+        swprintf_s(buf, buf, supported_max_fps_values[j]);
 
-        SendMessage(ctrl, CB_ADDSTRING, (WPARAM)j, (LPARAM)buf);
+        SendMessage(ctrl, CB_ADDSTRING, static_cast<WPARAM>(j), (LPARAM)buf);
     }
 
     // Set previous selection.
@@ -844,10 +1863,8 @@ void milk2_preferences_page::UpdateMaxFps(int screenmode) const
             max_fps = static_cast<UINT>(cfg_max_fps_fs);
             break;
     }
-    if (max_fps == 0)
-        SendMessage(ctrl, CB_SETCURSEL, (WPARAM)0, (LPARAM)0);
-    else
-        SendMessage(ctrl, CB_SETCURSEL, (WPARAM)(MAX_MAX_FPS - max_fps + 1), (LPARAM)0);
+    max_fps = sanitize_max_fps(max_fps);
+    SendMessage(ctrl, CB_SETCURSEL, combo_index_from_max_fps(max_fps), (LPARAM)0);
 }
 
 void milk2_preferences_page::SaveMaxFps(int screenmode) const
@@ -866,13 +1883,10 @@ void milk2_preferences_page::SaveMaxFps(int screenmode) const
         LRESULT n = SendMessage(ctrl, CB_GETCURSEL, (WPARAM)0, (LPARAM)0);
         if (n != CB_ERR)
         {
-            if (n > 0)
-                n = MAX_MAX_FPS + 1 - n;
-
             switch (screenmode)
             {
                 case FULLSCREEN:
-                    cfg_max_fps_fs = static_cast<UINT>(n);
+                    cfg_max_fps_fs = max_fps_from_combo_index(n);
                     break;
             }
         }
@@ -884,6 +1898,16 @@ void milk2_preferences_page::OpenToEdit(LPWSTR szDefault, LPCWSTR szFilename)
 
     if (szDefault[0] == L'\0')
         milk2_config::initialize_paths();
+    if (!ensure_edit_template_exists(szDefault, szFilename))
+    {
+        wchar_t title[MAX_PATH] = {0};
+        swprintf_s(title, L"Error Creating \"%ls\"", szFilename);
+        MessageBox(L"MilkDrop could not create the starter configuration file in your profile folder.",
+                   title,
+                   MB_OK | MB_ICONERROR | MB_SETFOREGROUND | MB_TOPMOST | MB_TASKMODAL);
+        return;
+    }
+
     wchar_t szPath[MAX_PATH]{}, szFile[MAX_PATH]{};
     wcscpy_s(szPath, szDefault);
     wchar_t* p = wcsrchr(szPath, L'\\');
@@ -899,6 +1923,33 @@ void milk2_preferences_page::OpenToEdit(LPWSTR szDefault, LPCWSTR szFilename)
             wchar_t* str = WASABI_API_LNGSTRINGW(IDS_ERROR_IN_SHELLEXECUTE);
             MessageBox(str, szPath, MB_OK | MB_SETFOREGROUND | MB_TOPMOST | MB_TASKMODAL);
         }
+    }
+}
+
+void milk2_preferences_page::OpenDirectory(LPCWSTR directory, LPCWSTR title)
+{
+    if (!directory || directory[0] == L'\0')
+        return;
+
+    std::error_code ec;
+    std::filesystem::create_directories(directory, ec);
+    if (ec)
+    {
+        wchar_t caption[MAX_PATH] = {0};
+        swprintf_s(caption, L"Error Creating \"%ls\"", title);
+        MessageBox(L"MilkDrop could not create the requested folder in your profile directory.",
+                   caption,
+                   MB_OK | MB_ICONERROR | MB_SETFOREGROUND | MB_TOPMOST | MB_TASKMODAL);
+        return;
+    }
+
+    const INT_PTR ret = reinterpret_cast<INT_PTR>(ShellExecute(NULL, L"open", directory, NULL, directory, SW_SHOWNORMAL));
+    if (ret <= 32)
+    {
+        wchar_t caption[MAX_PATH] = {0};
+        swprintf_s(caption, L"Error Opening \"%ls\"", title);
+        wchar_t* str = WASABI_API_LNGSTRINGW(IDS_ERROR_IN_SHELLEXECUTE);
+        MessageBox(str, caption, MB_OK | MB_SETFOREGROUND | MB_TOPMOST | MB_TASKMODAL);
     }
 }
 
@@ -1168,7 +2219,7 @@ void milk2_config::reset()
     settings.m_multisample_fs = {1u, 0u};
 
     //settings.m_start_fullscreen;
-    settings.m_max_fps_fs = static_cast<uint32_t>(cfg_max_fps_fs);
+    settings.m_max_fps_fs = static_cast<uint32_t>(sanitize_max_fps(static_cast<UINT>(cfg_max_fps_fs)));
     settings.m_show_press_f1_msg = static_cast<uint32_t>(cfg_bShowPressF1ForHelp);
     settings.m_allow_page_tearing_fs = static_cast<uint32_t>(cfg_allow_page_tearing_fs);
     //settings.m_save_cpu;
@@ -1243,6 +2294,7 @@ void milk2_config::reset()
     settings.m_bEnableMouseWheelVolume = cfg_bEnableMouseWheelVolume;
     settings.m_bEnableMouseClickPlayPause = cfg_bEnableMouseClickPlayPause;
     settings.m_bSeparateClickPromptFont = cfg_bSeparateClickPromptFont;
+    settings.m_bPopoutBorderless = cfg_bPopoutBorderless;
     settings.m_bEnableHDR = cfg_bEnableHDR;
     settings.m_bSkipCompShader = static_cast<uint32_t>(cfg_bSkipCompShader);
     settings.m_nBackBufferFormat = static_cast<uint32_t>(cfg_nBackBufferFormat);
@@ -1414,7 +2466,7 @@ void milk2_config::build(ui_element_config_builder& builder, const bool full_res
         //builder << m_multisample_w;
 
         //builder << settings.m_start_fullscreen;
-        cfg_max_fps_fs = settings.m_max_fps_fs;
+        cfg_max_fps_fs = sanitize_max_fps(settings.m_max_fps_fs);
         //builder << settings.m_show_press_f1_msg;
         cfg_allow_page_tearing_fs = settings.m_allow_page_tearing_fs;
         //builder << settings.m_minimize_winamp;
@@ -1493,6 +2545,7 @@ void milk2_config::build(ui_element_config_builder& builder, const bool full_res
         cfg_bEnableMouseWheelVolume = settings.m_bEnableMouseWheelVolume;
         cfg_bEnableMouseClickPlayPause = settings.m_bEnableMouseClickPlayPause;
         cfg_bSeparateClickPromptFont = settings.m_bSeparateClickPromptFont;
+        cfg_bPopoutBorderless = settings.m_bPopoutBorderless;
         cfg_bEnableHDR = settings.m_bEnableHDR;
 
         cfg_szTitleFormat = pfc::utf8FromWide(settings.m_szTitleFormat);
@@ -1516,5 +2569,6 @@ void milk2_config::persist_runtime_settings() const
     cfg_bEnableMouseWheelVolume = settings.m_bEnableMouseWheelVolume;
     cfg_bEnableMouseClickPlayPause = settings.m_bEnableMouseClickPlayPause;
     cfg_bSeparateClickPromptFont = settings.m_bSeparateClickPromptFont;
+    cfg_bPopoutBorderless = settings.m_bPopoutBorderless;
 }
 #pragma endregion

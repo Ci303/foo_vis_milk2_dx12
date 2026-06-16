@@ -1301,6 +1301,9 @@ int CShape::Import(FILE* f, const wchar_t* szFile, int i)
 
 bool CState::Import(const wchar_t* szIniFile, float fTime, CState* pOldState, DWORD ApplyFlags)
 {
+    if (!szIniFile || !szIniFile[0])
+        return false;
+
     // If any `ApplyFlags` are missing, the settings will be copied from `pOldState`.
     if (!pOldState)
         ApplyFlags = STATE_ALL;

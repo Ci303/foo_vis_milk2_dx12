@@ -100,8 +100,16 @@ class CMilkMenu
     CMilkMenuItem* GetCurItem() // NOTE: only works if an "item" is highlighted, not a child menu
     {
         CMilkMenuItem* pItem = m_pFirstChildItem;
+        if (!pItem)
+            return nullptr;
+
         for (int i = m_nChildMenus; i < m_nCurSel; i++)
+        {
+            if (!pItem)
+                return nullptr;
             pItem = pItem->m_pNext;
+        }
+
         return pItem;
     }
     const wchar_t* GetName() { return m_szMenuName; }

@@ -28,6 +28,7 @@
 #define ID_SPRITE                       13
 #define IDS_MILKDROP_ERROR              14
 #define ID_FONTS                        15
+#define ID_BLACKLIST                    16
 #define IDS_MILKDROP_WARNING            19
 //#define IDS_ERROR_CREATING_DOUBLE_SIZED_GDI_TITLE_FONT 20
 //#define IDS_ERROR_CREATING_DOUBLE_SIZED_D3DX_TITLE_FONT 21
@@ -629,6 +630,8 @@
 #define IDS_TITLE_FORMAT_HELP           647
 #define IDS_ARTWORK_FORMAT_HELP         648
 #define IDD_PREFS                       700
+#define IDD_PRESET_BLACKLIST            701
+#define IDD_FORMAT_INFO                 702
 //#define IDC_CB_FOG                      1000
 //#define IDC_CB_SUPERTEX                 1001
 //#define IDC_CB_HELP_MSG                 1001
@@ -892,6 +895,38 @@
 #define IDC_FONT1                       1093
 #define IDC_CB_MOUSE_WHEEL_VOLUME       1094
 #define IDC_CB_MOUSE_CLICK_PLAYPAUSE    1095
+#define IDC_BLACKLIST_LIST              1096
+#define IDC_BLACKLIST_ENTRY             1097
+#define IDC_BLACKLIST_ADD               1098
+#define IDC_BLACKLIST_REMOVE            1099
+#define IDC_BLACKLIST_OPEN              1100
+#define IDC_BLACKLIST_LABEL             1101
+#define IDC_BLACKLIST_PRESET_DIR        1103
+#define IDC_BLACKLIST_IMPORT            1104
+#define IDC_BLACKLIST_EXPORT            1105
+#define IDC_FORMAT_INFO                 1117
+#define IDC_FORMAT_INFO_EXAMPLES_LABEL  1118
+#define IDC_FORMAT_INFO_COMMON_LABEL    1119
+#define IDC_FORMAT_INFO_TITLE_TEXT      1120
+#define IDC_FORMAT_INFO_EXAMPLES_TEXT   1121
+#define IDC_FORMAT_INFO_COMMON_TEXT     1122
+#define IDC_FORMAT_INFO_ARTWORK_TEXT    1123
+#define IDC_FORMAT_INFO_LOAD_EXAMPLE_1  1124
+#define IDC_FORMAT_INFO_LOAD_EXAMPLE_2  1125
+#define IDC_FORMAT_INFO_FIELD_COMBO     1126
+#define IDC_FORMAT_INFO_ADD_FIELD       1127
+#define IDC_FORMAT_INFO_ADD_CRLF        1128
+#define IDC_FORMAT_INFO_BUILDER_TEXT    1129
+#define IDC_FORMAT_INFO_CLEAR_BUILDER   1130
+#define IDC_FORMAT_INFO_COPY_BUILDER    1131
+#define IDC_FORMAT_INFO_USE_TITLE       1132
+#define IDC_FORMAT_INFO_USE_ARTWORK     1133
+#define IDC_FORMAT_INFO_EXAMPLE_2_TEXT  1134
+#define IDC_CB_SEPARATE_CLICK_PROMPT_FONT 1135
+#define IDC_OPEN_MILKDROP_FOLDER        1136
+#define IDC_OPEN_TEXTURES_FOLDER        1137
+#define IDC_PREFS_SCROLLBAR             1138
+#define IDC_CB_POPOUT_BORDERLESS        1139
 #define ID_SHOWHELP                     40007
 #define ID_SHOWPLAYLIST                 40008
 #define ID_QUIT                         40009
@@ -902,9 +937,9 @@
 #ifdef APSTUDIO_INVOKED
 #ifndef APSTUDIO_READONLY_SYMBOLS
 #define _APS_NO_MFC                     1
-#define _APS_NEXT_RESOURCE_VALUE        103
+#define _APS_NEXT_RESOURCE_VALUE        703
 #define _APS_NEXT_COMMAND_VALUE         40011
-#define _APS_NEXT_CONTROL_VALUE         1096
+#define _APS_NEXT_CONTROL_VALUE         1140
 #define _APS_NEXT_SYMED_VALUE           101
 #endif
 #endif

@@ -21,6 +21,13 @@ static bool s_fullscreen = false;
 static bool s_in_toggle = false;
 static bool s_was_topmost = false;
 static bool s_milk2 = false;
+static bool s_popout = false;
+static bool s_popout_fullscreen = false;
+static HWND s_popout_parent = nullptr;
+static LONG_PTR s_popout_panel_style = 0;
+static LONG_PTR s_popout_panel_exstyle = 0;
+static RECT s_popout_panel_rect{};
+static RECT s_popout_window_rect{100, 100, 900, 700};
 static ULONGLONG s_count = 0ull;
 static constexpr ULONGLONG s_debug_limit = 1ull;
 static milk2_config s_config;
@@ -69,6 +76,8 @@ class milk2_ui_element : public ui_element_instance, public CWindowImpl<milk2_ui
         MSG_WM_MOVE(OnMove)
         MSG_WM_ENTERSIZEMOVE(OnEnterSizeMove)
         MSG_WM_EXITSIZEMOVE(OnExitSizeMove)
+        MESSAGE_HANDLER_EX(WM_NCHITTEST, OnNcHitTest)
+        MESSAGE_HANDLER_EX(WM_NCLBUTTONDBLCLK, OnNcLButtonDblClk)
         MSG_WM_NCCALCSIZE(OnNcCalcSize)
         MSG_WM_COPYDATA(OnCopyData)
         MSG_WM_DISPLAYCHANGE(OnDisplayChange)
@@ -85,6 +94,8 @@ class milk2_ui_element : public ui_element_instance, public CWindowImpl<milk2_ui
         MSG_WM_KILLFOCUS(OnKillFocus)
         MSG_WM_CONTEXTMENU(OnContextMenu)
         MSG_WM_LBUTTONDOWN(OnLButtonDown)
+        MSG_WM_LBUTTONUP(OnLButtonUp)
+        MSG_WM_MOUSEMOVE(OnMouseMove)
         MSG_WM_LBUTTONDBLCLK(OnLButtonDblClk)
         MSG_WM_MOUSEWHEEL(OnMouseWheel)
         MSG_WM_POWERBROADCAST(OnPowerBroadcast)
@@ -129,6 +140,8 @@ class milk2_ui_element : public ui_element_instance, public CWindowImpl<milk2_ui
     void OnMove(CPoint ptPos);
     void OnEnterSizeMove();
     void OnExitSizeMove();
+    LRESULT OnNcHitTest(UINT uMsg, WPARAM wParam, LPARAM lParam);
+    LRESULT OnNcLButtonDblClk(UINT uMsg, WPARAM wParam, LPARAM lParam);
     LRESULT OnNcCalcSize(BOOL bCalcValidRects, LPARAM lParam);
     BOOL OnCopyData(CWindow wnd, PCOPYDATASTRUCT pCopyDataStruct);
     void OnDisplayChange(UINT uBitsPerPixel, CSize sizeScreen);
@@ -146,6 +159,8 @@ class milk2_ui_element : public ui_element_instance, public CWindowImpl<milk2_ui
     void OnKillFocus(CWindow wndFocus);
     void OnContextMenu(CWindow wnd, CPoint point);
     void OnLButtonDown(UINT nFlags, CPoint point);
+    void OnLButtonUp(UINT nFlags, CPoint point);
+    void OnMouseMove(UINT nFlags, CPoint point);
     void OnLButtonDblClk(UINT nFlags, CPoint point);
     BOOL OnMouseWheel(UINT nFlags, short zDelta, CPoint point);
     LRESULT OnHotKey(UINT uMsg, WPARAM wParam, LPARAM lParam);
@@ -165,6 +180,7 @@ class milk2_ui_element : public ui_element_instance, public CWindowImpl<milk2_ui
     bool m_in_sizemove;
     bool m_in_suspend;
     bool m_minimized;
+    bool m_popout_drag_candidate;
 
     DWORD m_refresh_interval;
     double m_last_time;
@@ -178,11 +194,15 @@ class milk2_ui_element : public ui_element_instance, public CWindowImpl<milk2_ui
     };
 #endif
     static constexpr UINT_PTR ID_CLICK_TIMER = 2;
+    static constexpr UINT_PTR ID_BLACKLIST_TIMER = 3;
+    static constexpr DWORD ID_CLICK_CONFIRM_TIMEOUT_MS = 3500;
+    static constexpr UINT ID_BLACKLIST_RETRY_DELAY_MS = 50;
+    static constexpr UINT ID_BLACKLIST_MAX_RETRIES = 20;
 
     enum milk2_ui_menu_id
     {
         IDM_TOGGLE_FULLSCREEN = ID_VIS_FS,
-        IDM_CURRENT_PRESET = 1,
+        IDM_OPEN_PRESET_LOCATION = 1,
         IDM_NEXT_PRESET = ID_VIS_NEXT,
         IDM_PREVIOUS_PRESET = ID_VIS_PREV,
         IDM_LOCK_PRESET = 2,
@@ -195,6 +215,9 @@ class milk2_ui_element : public ui_element_instance, public CWindowImpl<milk2_ui
         IDM_SHOW_RATING = 8,
         IDM_SHOW_SONG_TIME = 9,
         IDM_SHOW_SHADER_HELP = 10,
+        IDM_BLACKLIST_PRESET = 11,
+        IDM_TOGGLE_POPOUT = 12,
+        IDM_LOAD_PRESET_FILE = 13,
         IDM_SHOW_MENU = ID_VIS_MENU,
         IDM_SHOW_PREFS = ID_VIS_CFG,
         IDM_SHOW_HELP = ID_SHOWHELP,
@@ -219,10 +242,13 @@ class milk2_ui_element : public ui_element_instance, public CWindowImpl<milk2_ui
     void PrevPreset(float fBlendTime = s_config.settings.m_fBlendTimeUser);
     void NextPreset(float fBlendTime = s_config.settings.m_fBlendTimeUser);
     bool LoadPreset(int select);
+    void LoadPresetFromFile();
     void RandomPreset(float fBlendTime = s_config.settings.m_fBlendTimeUser);
     void LockPreset(bool lockUnlock);
     bool IsPresetLock();
     std::wstring GetCurrentPreset();
+    void OpenCurrentPresetLocation();
+    void BlacklistCurrentPreset();
     void SetPresetRating(float inc_dec);
     void Seek(UINT nRepCnt, bool bShiftHeldDown, double seekDelta);
 
@@ -238,6 +264,11 @@ class milk2_ui_element : public ui_element_instance, public CWindowImpl<milk2_ui
     void SetPwd(std::wstring pwd) noexcept;
     void UpdateChannelMode();
     void ToggleFullScreen();
+    void TogglePopout();
+    void OpenPopoutWindow();
+    void ReturnPopoutToPanel();
+    void TogglePopoutFullscreen();
+    void ResizePluginToCurrentClient(const char* context, bool wait_for_lock = false) noexcept;
     void ToggleHelp();
     void TogglePlaylist();
     void ToggleSongTitle();
@@ -258,6 +289,12 @@ class milk2_ui_element : public ui_element_instance, public CWindowImpl<milk2_ui
     void RegisterFocusHotkeys() noexcept;
     void UnregisterFocusHotkeys() noexcept;
     void TogglePlaybackFromClick();
+    void QueueStatusText(const wchar_t* text, float duration = 1.6f, float fadeTime = 0.35f, int fontIndex = SONGTITLE_FONT);
+    bool ConsumeClickPauseConfirmation(DWORD now) noexcept;
+    void QueueClickPauseConfirmation(DWORD now);
+    void QueueSongTitle();
+    void FlushPendingAnimatedText();
+    bool LaunchStatusText(const wchar_t* text, float duration = 0.9f, float fadeTime = 0.25f, int fontIndex = SONGTITLE_FONT);
 
     // MilkDrop status
     std::atomic_bool m_milk2{false};
@@ -270,18 +307,30 @@ class milk2_ui_element : public ui_element_instance, public CWindowImpl<milk2_ui
 #endif
 
 #ifdef TIMER_TP
-    // Thread pool timer
+    // QPC-paced render scheduler
     void StartTimer() noexcept;
     void StopTimer() noexcept;
     void ScheduleNextFrameTimer() noexcept;
-    void AdvanceFrameTimerDeadline() noexcept;
-    static VOID CALLBACK TimerCallback(PTP_CALLBACK_INSTANCE Instance, PVOID Context, PTP_TIMER Timer) noexcept;
+    void FramePacerThreadLoop() noexcept;
+    static DWORD WINAPI FramePacerThreadProc(LPVOID context) noexcept;
+    bool TryBeginFrame(LONGLONG& renderQpc) noexcept;
+    void FinishFrameTiming(LONGLONG renderQpc) noexcept;
+    void ResetFrameTimingStats() noexcept;
+    void RecordFrameCadence(LONGLONG renderQpc) noexcept;
+    bool QueueRenderMessage() noexcept;
+    void SetFrameTimerResolution(bool enabled) noexcept;
     LONGLONG m_frameTimerFrequencyQpc;
     std::atomic<LONGLONG> m_frameIntervalQpc{0};
     std::atomic<LONGLONG> m_nextFrameQpc{0};
-    PTP_TIMER m_tpTimer;
+    std::atomic<LONGLONG> m_lastRenderQpc{0};
+    std::atomic<LONGLONG> m_frameStatsStartQpc{0};
+    std::atomic_uint m_frameStatsCount{0};
+    HANDLE m_framePacerThread = nullptr;
+    HANDLE m_framePacerStopEvent = nullptr;
+    HANDLE m_framePacerWakeEvent = nullptr;
     std::atomic_bool m_renderPending{false};
     std::atomic_ulong m_renderPostTick{0};
+    bool m_timerResolutionActive = false;
 #endif
 
     // Topmost setting
@@ -301,7 +350,24 @@ class milk2_ui_element : public ui_element_instance, public CWindowImpl<milk2_ui
     static_api_ptr_t<playback_control> m_playback_control;
     bool m_focus_hotkeys_registered;
     bool m_pending_single_click;
+    bool m_click_pause_confirmation_required;
+    bool m_click_pause_confirmation_pending;
+    UINT m_blacklist_load_retries;
     DWORD m_last_left_double_click_tick;
+    DWORD m_click_pause_confirmation_tick;
+    CPoint m_popout_drag_origin;
+    enum class pending_animated_text_kind
+    {
+        none,
+        status,
+        song_title
+    };
+    std::mutex m_pending_animated_text_mutex;
+    pending_animated_text_kind m_pending_animated_text_kind;
+    std::wstring m_pending_animated_status_text;
+    float m_pending_animated_status_duration;
+    float m_pending_animated_status_fade_time;
+    int m_pending_animated_status_font;
     titleformat_object::ptr m_script;
     titleformat_object::ptr m_title;
     titleformat_object::ptr m_search;
@@ -314,10 +380,12 @@ class milk2_ui_element : public ui_element_instance, public CWindowImpl<milk2_ui
 
     // clang-format off
     // Playback callback methods
-    void on_playback_starting(play_control::t_track_command /*p_command*/, bool /*p_paused*/) { MILK2_CONSOLE_LOG("+ PlaybackStart") UpdateTrack(); }
-    void on_playback_new_track(metadb_handle_ptr p_track) { MILK2_CONSOLE_LOG("+ PlaybackNew") UpdateTrack(p_track); }
-    void on_playback_stop(play_control::t_stop_reason /*p_reason*/) { MILK2_CONSOLE_LOG("+ PlaybackStop") UpdateTrack(); }
+    void on_playback_starting(play_control::t_track_command p_command, bool p_paused);
+    void on_playback_new_track(metadb_handle_ptr p_track);
+    void on_playback_stop(play_control::t_stop_reason p_reason);
+    void on_playback_pause(bool p_state);
 
+    void UpdateFoobarPlaybackState();
     void UpdateTrack();
     void UpdateTrack(metadb_handle_ptr p_track);
 

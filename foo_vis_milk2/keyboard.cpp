@@ -53,7 +53,7 @@
 //   F4: show preset name
 //   F5: show frames per second (FPS)
 //   F6: show rating of current preset
-//   Y, F7: re-read custom message file (milk_msg.ini) from disk
+//   Y, F7: re-read custom message file (milk2_msg.ini) from disk
 //   F8: jump to new presets directory
 //   F9: show shader help (in shader edit mode)
 //
@@ -67,18 +67,18 @@
 //   T: launch song title animation
 //   Y: enter custom message mode
 //       ##: load message ## (where ## is a 2-digit numeric code [00-99]
-//                            of a message defined in milk_msg.ini)
+//                            of a message defined in milk2_msg.ini)
 //       *: clear any digits entered
 //       DELETE: clear message (if visible)
-//       F7: re-read milk_msg.ini from disk
+//       F7: re-read milk2_msg.ini from disk
 //   K: enter sprite mode
 //       ##: load sprite ## (where ## is a 2-digit numeric code [00-99]
-//                           of a sprite defined in milk_img.ini)
+//                           of a sprite defined in milk2_img.ini)
 //       *: clear any digits entered
 //       DELETE: clear newest sprite 
 //       SHIFT + DELETE: clear oldest sprite
 //       CTRL + SHIFT + DELETE: clear all sprites
-//       F7: no effect (milk_img.ini is never cached)
+//       F7: no effect (milk2_img.ini is never cached)
 //   SHIFT + K: enter sprite kill mode
 //       ##: clear all sprites with code ##
 //       *: clear any digits entered
@@ -119,7 +119,7 @@
 
 // KEY HANDLING
 //  - In all cases, handle or capture:
-//    - ZXCVBRS, zxcvbrs; case-insensitive (lowercase come through only as WM_CHAR; uppercase come in as both)
+//    - Space and ZXCVBRS, zxcvbrs; case-insensitive (lowercase come through only as WM_CHAR; uppercase come in as both)
 //    - ALT+ENTER
 //    - F1, ESC, UP, DOWN, LEFT, RIGHT, SHIFT+LEFT/RIGHT
 //    - P for playlist
@@ -470,6 +470,10 @@ void milk2_ui_element::OnChar(TCHAR chChar, UINT nRepCnt, UINT nFlags)
     {
         switch (chChar)
         {
+            case ' ':
+                if (UI_mode == UI_REGULAR && !IsPresetLock())
+                    RandomPreset(s_config.settings.m_fBlendTimeUser);
+                return;
             case '0':
             case '1':
             case '2':
@@ -505,9 +509,13 @@ void milk2_ui_element::OnChar(TCHAR chChar, UINT nRepCnt, UINT nFlags)
                 return;
             case 'q':
                 g_plugin.m_pState->m_fVideoEchoZoom /= 1.05f;
+                if (g_plugin.m_pState->var_pf_echo_zoom)
+                    *g_plugin.m_pState->var_pf_echo_zoom = g_plugin.m_pState->m_fVideoEchoZoom.eval(-1.0f);
                 return;
             case 'Q':
                 g_plugin.m_pState->m_fVideoEchoZoom *= 1.05f;
+                if (g_plugin.m_pState->var_pf_echo_zoom)
+                    *g_plugin.m_pState->var_pf_echo_zoom = g_plugin.m_pState->m_fVideoEchoZoom.eval(-1.0f);
                 return;
             case 'w':
                 g_plugin.m_pState->m_nWaveMode++;
@@ -1430,7 +1438,7 @@ void milk2_ui_element::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)
                 {
                     ToggleHelp();
                 }
-                else if (s_fullscreen)
+                else if (s_fullscreen || s_popout_fullscreen)
                 {
                     ToggleFullScreen();
                 }
@@ -1837,7 +1845,7 @@ UINT milk2_ui_element::OnGetDlgCode(LPMSG lpMsg)
     //            break;
     //    }
     //}
-    return WM_GETDLGCODE;
+    return DLGC_WANTALLKEYS | DLGC_WANTCHARS | DLGC_WANTARROWS | DLGC_WANTMESSAGE;
 }
 
 void milk2_ui_element::RegisterFocusHotkeys() noexcept
@@ -1887,6 +1895,8 @@ void milk2_ui_element::OnKillFocus(CWindow wndFocus)
     UnregisterFocusHotkeys();
     KillTimer(ID_CLICK_TIMER);
     m_pending_single_click = false;
+    m_click_pause_confirmation_required = true;
+    m_click_pause_confirmation_pending = false;
     //g_plugin.m_bMilkdropScrollLockState = GetKeyState(VK_SCROLL) & 1;
     //SetScrollLock(g_plugin.m_bOrigScrollLockState);
 }
@@ -1918,22 +1928,91 @@ LRESULT milk2_ui_element::OnHotKey(UINT uMsg, WPARAM wParam, LPARAM lParam)
 void milk2_ui_element::OnLButtonDown(UINT nFlags, CPoint point)
 {
     UNREFERENCED_PARAMETER(nFlags);
-    UNREFERENCED_PARAMETER(point);
 
     const HWND focus = ::GetFocus();
     const bool hadFocus = (focus == get_wnd()) || ::IsChild(get_wnd(), focus);
     if (!hadFocus)
-    {
         ::SetFocus(get_wnd());
-        return;
+
+    if (s_popout && !s_popout_fullscreen && s_config.settings.m_bPopoutBorderless)
+    {
+        m_popout_drag_candidate = true;
+        m_popout_drag_origin = point;
+        ::SetCapture(get_wnd());
     }
 
     if (!s_config.settings.m_bEnableMouseClickPlayPause)
         return;
 
     KillTimer(ID_CLICK_TIMER);
+    m_pending_single_click = false;
+
+    const DWORD now = GetTickCount();
+    const bool confirmationWasPending = m_click_pause_confirmation_pending;
+    if (ConsumeClickPauseConfirmation(now))
+    {
+        m_pending_single_click = true;
+        SetTimer(ID_CLICK_TIMER, GetDoubleClickTime(), nullptr);
+        return;
+    }
+
+    if (!hadFocus || m_click_pause_confirmation_required || confirmationWasPending)
+    {
+        QueueClickPauseConfirmation(now);
+        return;
+    }
+
     m_pending_single_click = true;
     SetTimer(ID_CLICK_TIMER, GetDoubleClickTime(), nullptr);
+}
+
+void milk2_ui_element::OnLButtonUp(UINT nFlags, CPoint point)
+{
+    UNREFERENCED_PARAMETER(nFlags);
+    UNREFERENCED_PARAMETER(point);
+
+    if (m_popout_drag_candidate)
+    {
+        m_popout_drag_candidate = false;
+        if (::GetCapture() == get_wnd())
+            ::ReleaseCapture();
+    }
+}
+
+void milk2_ui_element::OnMouseMove(UINT nFlags, CPoint point)
+{
+    if (!m_popout_drag_candidate)
+        return;
+
+    if ((nFlags & MK_LBUTTON) == 0)
+    {
+        m_popout_drag_candidate = false;
+        if (::GetCapture() == get_wnd())
+            ::ReleaseCapture();
+        return;
+    }
+
+    const int dragX = (std::max)(1, ::GetSystemMetrics(SM_CXDRAG));
+    const int dragY = (std::max)(1, ::GetSystemMetrics(SM_CYDRAG));
+    if (std::abs(point.x - m_popout_drag_origin.x) < dragX &&
+        std::abs(point.y - m_popout_drag_origin.y) < dragY)
+    {
+        return;
+    }
+
+    m_popout_drag_candidate = false;
+    KillTimer(ID_CLICK_TIMER);
+    m_pending_single_click = false;
+    m_click_pause_confirmation_pending = false;
+    if (::GetCapture() == get_wnd())
+        ::ReleaseCapture();
+
+    POINT screenPoint{point.x, point.y};
+    ::ClientToScreen(get_wnd(), &screenPoint);
+    ::SendMessage(get_wnd(),
+                  WM_NCLBUTTONDOWN,
+                  HTCAPTION,
+                  MAKELPARAM(static_cast<SHORT>(screenPoint.x), static_cast<SHORT>(screenPoint.y)));
 }
 
 BOOL milk2_ui_element::OnMouseWheel(UINT nFlags, short zDelta, CPoint point)
@@ -1967,7 +2046,15 @@ BOOL milk2_ui_element::OnMouseWheel(UINT nFlags, short zDelta, CPoint point)
 
 void milk2_ui_element::TogglePlaybackFromClick()
 {
+    m_click_pause_confirmation_required = false;
+    m_click_pause_confirmation_pending = false;
+
+    const bool was_playing = m_playback_control->is_playing() && !m_playback_control->is_paused();
     m_playback_control->toggle_pause();
+    if (was_playing)
+        QueueStatusText(L"Paused", 1.6f, 0.35f, SONGTITLE_FONT);
+    else
+        QueueSongTitle();
 }
 
 #undef waitstring

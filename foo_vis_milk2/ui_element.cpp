@@ -30,30 +30,125 @@ HWND g_hWindow;
 
 namespace
 {
+uint32_t normalize_frame_limit(uint32_t max_fps) noexcept
+{
+    for (size_t i = 0; i < supported_max_fps_count; ++i)
+    {
+        if (max_fps == supported_max_fps_values[i])
+            return max_fps;
+    }
+    return default_max_fps_fs;
+}
+
 DWORD get_refresh_interval_ms(uint32_t max_fps) noexcept
 {
+    max_fps = normalize_frame_limit(max_fps);
     if (max_fps == 0)
         return 1;
 
     return (std::max)(1L, lround(1000.0 / static_cast<double>(max_fps)));
 }
 
-FILETIME make_relative_threadpool_due_time(LONGLONG delay100ns) noexcept
+bool call_winmm_timer_period(const char* procName) noexcept
 {
-    LARGE_INTEGER dueTime{};
-    dueTime.QuadPart = -(std::max)(1LL, delay100ns);
+    using TimerPeriodProc = UINT(WINAPI*)(UINT);
+    static HMODULE winmm = ::LoadLibraryW(L"winmm.dll");
+    if (winmm == nullptr)
+        return false;
 
-    const auto bits = static_cast<ULONGLONG>(dueTime.QuadPart);
-    FILETIME fileTime{};
-    fileTime.dwLowDateTime = static_cast<DWORD>(bits & 0xFFFFFFFFu);
-    fileTime.dwHighDateTime = static_cast<DWORD>(bits >> 32);
-    return fileTime;
+    auto proc = reinterpret_cast<TimerPeriodProc>(::GetProcAddress(winmm, procName));
+    return proc != nullptr && proc(1) == 0;
+}
+
+bool is_dx12_truthy_log_value(const wchar_t* value) noexcept
+{
+    return value && value[0] != L'\0' && wcscmp(value, L"0") != 0 && _wcsicmp(value, L"false") != 0;
+}
+
+bool resolve_dx12_ui_log_path(wchar_t* logPath, size_t logPathCount) noexcept
+{
+    if (!logPath || logPathCount == 0)
+        return false;
+
+    logPath[0] = L'\0';
+
+    wchar_t logValue[MAX_PATH] = {};
+    const DWORD valueLength = GetEnvironmentVariableW(L"FOO_VIS_MILK2_DX12_LOG", logValue, static_cast<DWORD>(std::size(logValue)));
+    if (valueLength >= std::size(logValue))
+        return false;
+    if (valueLength > 0 && !is_dx12_truthy_log_value(logValue))
+        return false;
+
+    const bool useDefaultPath =
+        valueLength == 0 ||
+        wcscmp(logValue, L"1") == 0 ||
+        _wcsicmp(logValue, L"true") == 0;
+    if (!useDefaultPath)
+    {
+        wcscpy_s(logPath, logPathCount, logValue);
+        return true;
+    }
+
+    wchar_t devValue[8]{};
+    const DWORD devValueLength = GetEnvironmentVariableW(L"FOO_VIS_MILK2_DX12_DEV", devValue, static_cast<DWORD>(std::size(devValue)));
+    if (valueLength == 0 && (devValueLength == 0 || !is_dx12_truthy_log_value(devValue)))
+        return false;
+
+    wchar_t exePath[MAX_PATH]{};
+    const DWORD exeLength = GetModuleFileNameW(nullptr, exePath, static_cast<DWORD>(std::size(exePath)));
+    if (exeLength == 0 || exeLength >= std::size(exePath))
+        return false;
+
+    wchar_t* lastSlash = wcsrchr(exePath, L'\\');
+    if (!lastSlash)
+        return false;
+    *(lastSlash + 1) = L'\0';
+
+    wcscpy_s(logPath, logPathCount, exePath);
+    wcscat_s(logPath, logPathCount, L"profile\\");
+    CreateDirectoryW(logPath, nullptr);
+    wcscat_s(logPath, logPathCount, L"foo_vis_milk2_dx12.log");
+    return true;
+}
+
+void write_dx12_ui_log_line(const wchar_t* message) noexcept
+{
+    wchar_t logPath[MAX_PATH]{};
+    if (!resolve_dx12_ui_log_path(logPath, std::size(logPath)))
+        return;
+
+    HANDLE file = CreateFileW(logPath, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE)
+        return;
+
+    SYSTEMTIME st{};
+    GetLocalTime(&st);
+    wchar_t line[1024]{};
+    swprintf_s(line,
+               L"%04u-%02u-%02u %02u:%02u:%02u.%03u ui %ls\r\n",
+               st.wYear,
+               st.wMonth,
+               st.wDay,
+               st.wHour,
+               st.wMinute,
+               st.wSecond,
+               st.wMilliseconds,
+               message ? message : L"");
+
+    char utf8Line[2048]{};
+    const int bytes = WideCharToMultiByte(CP_UTF8, 0, line, -1, utf8Line, static_cast<int>(std::size(utf8Line)), nullptr, nullptr);
+    if (bytes > 1)
+    {
+        DWORD bytesWritten = 0;
+        WriteFile(file, utf8Line, static_cast<DWORD>(bytes - 1), &bytesWritten, nullptr);
+    }
+    CloseHandle(file);
 }
 
 milk2_ui_element::milk2_ui_element(ui_element_config::ptr config, ui_element_instance_callback_ptr p_callback) :
     m_callback(p_callback),
     m_bMsgHandled(TRUE),
-    play_callback_impl_base(flag_on_playback_starting | flag_on_playback_new_track | flag_on_playback_stop),
+    play_callback_impl_base(flag_on_playback_starting | flag_on_playback_new_track | flag_on_playback_stop | flag_on_playback_pause),
     playlist_callback_impl_base(flag_on_items_added | flag_on_items_reordered | flag_on_items_removed | flag_on_items_selection_change |
                                 flag_on_item_focus_change | flag_on_items_modified | flag_on_playlist_activate | flag_on_playlists_reorder |
                                 flag_on_playlists_removed | flag_on_playback_order_changed)
@@ -64,9 +159,20 @@ milk2_ui_element::milk2_ui_element(ui_element_config::ptr config, ui_element_ins
     m_minimized = false;
     m_focus_hotkeys_registered = false;
     m_pending_single_click = false;
+    m_popout_drag_candidate = false;
+    m_click_pause_confirmation_required = false;
+    m_click_pause_confirmation_pending = false;
+    m_blacklist_load_retries = 0;
     m_last_left_double_click_tick = 0;
+    m_click_pause_confirmation_tick = 0;
+    m_pending_animated_text_kind = pending_animated_text_kind::none;
+    m_pending_animated_status_duration = 1.6f;
+    m_pending_animated_status_fade_time = 0.35f;
+    m_pending_animated_status_font = SONGTITLE_FONT;
 #if defined(TIMER_TP)
-    m_tpTimer = nullptr;
+    m_framePacerThread = nullptr;
+    m_framePacerStopEvent = nullptr;
+    m_framePacerWakeEvent = nullptr;
     LARGE_INTEGER frameTimerFrequency{};
     m_frameTimerFrequencyQpc = QueryPerformanceFrequency(&frameTimerFrequency) ? frameTimerFrequency.QuadPart : 0;
     if (m_frameTimerFrequencyQpc > 0)
@@ -202,9 +308,7 @@ int milk2_ui_element::OnCreate(LPCREATESTRUCT cs)
             FB2K_console_print(core_api::get_my_file_name(), ": Exception while creating visualization stream - ", exc);
         }
 
-#if defined(TIMER_TP)
-        m_tpTimer = CreateThreadpoolTimer(TimerCallback, this, NULL);
-#elif defined(TIMER_DX)
+#if defined(TIMER_DX)
         message_loop_v2::get()->add_idle_handler(this);
 #endif
 
@@ -234,6 +338,11 @@ int milk2_ui_element::OnCreate(LPCREATESTRUCT cs)
 void milk2_ui_element::OnClose()
 {
     MILK2_CONSOLE_LOG("OnClose ", GetWnd())
+    if (s_popout)
+    {
+        ReturnPopoutToPanel();
+        return;
+    }
     //DestroyWindow();
 }
 
@@ -271,6 +380,9 @@ void milk2_ui_element::OnDestroy()
         g_plugin.SetFoobarFullscreenFrameLimit(0);
         s_in_toggle = false;
         s_was_topmost = false;
+        s_popout = false;
+        s_popout_fullscreen = false;
+        s_popout_parent = nullptr;
         s_milk2 = false;
 #if defined(TIMER_32)
         KillTimer(ID_REFRESH_TIMER);
@@ -279,15 +391,18 @@ void milk2_ui_element::OnDestroy()
         g_plugin.PluginQuit();
 
         HWND parent = GetRealParent(get_wnd());
-        ::SetClassLongPtr(parent, GCLP_HICON, NULL);
-        ::SetClassLongPtr(parent, GCLP_HICONSM, NULL);
+        if (parent && parent != ::GetDesktopWindow())
+        {
+            ::SetClassLongPtr(parent, GCLP_HICON, NULL);
+            ::SetClassLongPtr(parent, GCLP_HICONSM, NULL);
+        }
 
         //PostQuitMessage(0);
     }
     else
     {
         s_in_toggle = false;
-        if (!s_fullscreen && g_hWindow && g_hWindow != get_wnd() && ::IsWindow(g_hWindow))
+        if (!s_fullscreen && !s_popout_fullscreen && g_hWindow && g_hWindow != get_wnd() && ::IsWindow(g_hWindow))
         {
             ::PostMessage(g_hWindow, WM_MILK2_RESTORE_WINDOWED, 0, 0);
         }
@@ -312,9 +427,33 @@ void milk2_ui_element::OnTimer(UINT_PTR nIDEvent)
         {
             m_pending_single_click = false;
             const DWORD now = GetTickCount();
-            if (m_last_left_double_click_tick == 0 || now - m_last_left_double_click_tick > GetDoubleClickTime())
-                TogglePlaybackFromClick();
+            if (m_last_left_double_click_tick != 0 && now - m_last_left_double_click_tick <= GetDoubleClickTime())
+                return;
+
+            TogglePlaybackFromClick();
         }
+        return;
+    }
+
+    if (nIDEvent == ID_BLACKLIST_TIMER)
+    {
+        KillTimer(ID_BLACKLIST_TIMER);
+#ifdef TIMER_TP
+        if (s_cs_initialized && TryEnterCriticalSection(&s_cs) == 0)
+        {
+            if (++m_blacklist_load_retries <= ID_BLACKLIST_MAX_RETRIES)
+                SetTimer(ID_BLACKLIST_TIMER, ID_BLACKLIST_RETRY_DELAY_MS, nullptr);
+            else
+                m_blacklist_load_retries = 0;
+            return;
+        }
+#endif
+        g_plugin.LoadRandomPreset(0.0f);
+#ifdef TIMER_TP
+        if (s_cs_initialized)
+            LeaveCriticalSection(&s_cs);
+#endif
+        m_blacklist_load_retries = 0;
         return;
     }
 
@@ -388,7 +527,7 @@ BOOL milk2_ui_element::OnEraseBkgnd(CDCHandle dc)
     WIN32_OP_D(brush.CreateSolidBrush(m_callback->query_std_color(ui_color_background)) != NULL);
     WIN32_OP_D(dc.FillRect(&r, brush));
 #else
-    if (!g_plugin.IsD3D12Active() && !m_milk2 && !s_fullscreen && s_milk2 && !s_in_toggle)
+    if (!g_plugin.IsD3D12Active() && !m_milk2 && !s_fullscreen && !s_popout_fullscreen && s_milk2 && !s_in_toggle)
     {
         int w, h;
         GetDefaultSize(w, h);
@@ -471,7 +610,7 @@ void milk2_ui_element::OnSize(UINT nType, CSize size)
             return;
 #endif
         g_plugin.OnWindowSizeChanged(width, height);
-        if (g_plugin.IsD3D12Active() && !s_fullscreen)
+        if (g_plugin.IsD3D12Active() && !s_fullscreen && !s_popout_fullscreen)
             ::SetTimer(get_wnd(), WM_MILK2_REPAIR_WINDOWED_DX12, 180, nullptr);
 #ifdef TIMER_TP
         LeaveCriticalSection(&s_cs);
@@ -500,12 +639,77 @@ void milk2_ui_element::OnExitSizeMove()
         const int width = std::max<int>(rc.right - rc.left, 128);
         const int height = std::max<int>(rc.bottom - rc.top, 128);
         g_plugin.OnWindowSizeChanged(width, height);
-        if (g_plugin.IsD3D12Active() && !s_fullscreen)
+        if (g_plugin.IsD3D12Active() && !s_fullscreen && !s_popout_fullscreen)
             ::SetTimer(get_wnd(), WM_MILK2_REPAIR_WINDOWED_DX12, 180, nullptr);
 #ifdef TIMER_TP
         LeaveCriticalSection(&s_cs);
 #endif
     }
+}
+
+LRESULT milk2_ui_element::OnNcHitTest(UINT uMsg, WPARAM wParam, LPARAM lParam)
+{
+    UNREFERENCED_PARAMETER(uMsg);
+    UNREFERENCED_PARAMETER(wParam);
+
+    if (!s_popout || s_popout_fullscreen || !s_config.settings.m_bPopoutBorderless)
+    {
+        SetMsgHandled(FALSE);
+        return 0;
+    }
+
+    RECT windowRect{};
+    if (!::GetWindowRect(get_wnd(), &windowRect))
+    {
+        SetMsgHandled(FALSE);
+        return 0;
+    }
+
+    POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+    const int resizeBorder = 8;
+    const int dragBand = 40;
+
+    const bool left = point.x >= windowRect.left && point.x < windowRect.left + resizeBorder;
+    const bool right = point.x <= windowRect.right && point.x > windowRect.right - resizeBorder;
+    const bool top = point.y >= windowRect.top && point.y < windowRect.top + resizeBorder;
+    const bool bottom = point.y <= windowRect.bottom && point.y > windowRect.bottom - resizeBorder;
+
+    if (top && left)
+        return HTTOPLEFT;
+    if (top && right)
+        return HTTOPRIGHT;
+    if (bottom && left)
+        return HTBOTTOMLEFT;
+    if (bottom && right)
+        return HTBOTTOMRIGHT;
+    if (left)
+        return HTLEFT;
+    if (right)
+        return HTRIGHT;
+    if (top)
+        return HTTOP;
+    if (bottom)
+        return HTBOTTOM;
+
+    if (point.y >= windowRect.top && point.y < windowRect.top + dragBand)
+        return HTCAPTION;
+
+    return HTCLIENT;
+}
+
+LRESULT milk2_ui_element::OnNcLButtonDblClk(UINT uMsg, WPARAM wParam, LPARAM lParam)
+{
+    UNREFERENCED_PARAMETER(uMsg);
+    UNREFERENCED_PARAMETER(lParam);
+
+    if (s_popout && !s_popout_fullscreen && s_config.settings.m_bPopoutBorderless && wParam == HTCAPTION)
+    {
+        TogglePopoutFullscreen();
+        return 0;
+    }
+
+    SetMsgHandled(FALSE);
+    return 0;
 }
 
 // To avoid a 1-pixel-thick border of noise.
@@ -514,6 +718,11 @@ LRESULT milk2_ui_element::OnNcCalcSize(BOOL bCalcValidRects, LPARAM lParam)
     UNREFERENCED_PARAMETER(lParam);
 
     MILK2_CONSOLE_LOG("OnNcCalcSize ", GetWnd())
+    if (s_popout && !s_popout_fullscreen && !s_config.settings.m_bPopoutBorderless)
+    {
+        SetMsgHandled(FALSE);
+        return 0;
+    }
     if (bCalcValidRects == TRUE)
     {
         //auto& params = *reinterpret_cast<NCCALCSIZE_PARAMS*>(lParam);
@@ -624,6 +833,8 @@ void milk2_ui_element::OnLButtonDblClk(UINT nFlags, CPoint point)
     m_last_left_double_click_tick = GetTickCount();
     KillTimer(ID_CLICK_TIMER);
     m_pending_single_click = false;
+    m_click_pause_confirmation_required = false;
+    m_click_pause_confirmation_pending = false;
     ToggleFullScreen();
 }
 
@@ -652,12 +863,21 @@ void milk2_ui_element::OnContextMenu(CWindow wnd, CPoint point)
     //CMenu original;
     //b = menu.LoadMenu(IDR_WINDOWED_CONTEXT_MENU);
     //menu.AppendMenu(MF_STRING, menu.GetSubMenu(0), TEXT("Winamp"));
-    menu.AppendMenu(MF_GRAYED, IDM_CURRENT_PRESET, GetCurrentPreset().c_str());
+    KillTimer(ID_CLICK_TIMER);
+    m_pending_single_click = false;
+    m_click_pause_confirmation_required = true;
+    m_click_pause_confirmation_pending = false;
+
+    const std::wstring currentPreset = GetCurrentPreset();
+    const UINT presetItemFlags = currentPreset.empty() ? (MF_STRING | MF_GRAYED) : MF_STRING;
+    menu.AppendMenu(presetItemFlags, IDM_OPEN_PRESET_LOCATION, currentPreset.empty() ? TEXT("(No preset loaded)") : currentPreset.c_str());
     menu.AppendMenu(MF_SEPARATOR);
     menu.AppendMenu(MF_STRING, IDM_NEXT_PRESET, TEXT("Next Preset"));
     menu.AppendMenu(MF_STRING, IDM_PREVIOUS_PRESET, TEXT("Previous Preset"));
     menu.AppendMenu(MF_STRING, IDM_SHUFFLE_PRESET, TEXT("Random Preset"));
+    menu.AppendMenu(MF_STRING, IDM_LOAD_PRESET_FILE, TEXT("Load Preset..."));
     menu.AppendMenu(MF_STRING | (IsPresetLock() ? MF_CHECKED : 0), IDM_LOCK_PRESET, TEXT("Lock Preset"));
+    menu.AppendMenu(currentPreset.empty() ? (MF_STRING | MF_GRAYED) : MF_STRING, IDM_BLACKLIST_PRESET, TEXT("Never Show Again"));
     menu.AppendMenu(MF_SEPARATOR);
     menu.AppendMenu(MF_STRING | (s_config.settings.m_bEnableDownmix ? MF_CHECKED : 0), IDM_ENABLE_DOWNMIX, TEXT("Downmix Channels"));
     menu.AppendMenu(MF_SEPARATOR);
@@ -678,7 +898,11 @@ void milk2_ui_element::OnContextMenu(CWindow wnd, CPoint point)
     menu.AppendMenu(MF_STRING | (g_plugin.m_show_help ? MF_CHECKED : 0), IDM_SHOW_HELP, TEXT("Show Help"));
     menu.AppendMenu(MF_STRING, IDM_SHOW_PREFS, TEXT("Launch Preferences Page"));
     menu.AppendMenu(MF_SEPARATOR);
-    menu.AppendMenu(MF_STRING | (s_fullscreen ? MF_CHECKED : 0), IDM_TOGGLE_FULLSCREEN, TEXT("Fullscreen"));
+    const UINT popoutFlags = MF_STRING
+        | (s_popout ? MF_CHECKED : 0)
+        | ((s_fullscreen && !s_popout) ? MF_GRAYED : 0);
+    menu.AppendMenu(popoutFlags, IDM_TOGGLE_POPOUT, s_popout ? TEXT("Return to Panel") : TEXT("Pop Out Window"));
+    menu.AppendMenu(MF_STRING | ((s_fullscreen || s_popout_fullscreen) ? MF_CHECKED : 0), IDM_TOGGLE_FULLSCREEN, TEXT("Fullscreen"));
 
     //auto submenu = std::make_unique<CMenu>(menu.GetSubMenu(0));
     //b = menu.RemoveMenu(0, MF_BYPOSITION);
@@ -688,9 +912,15 @@ void milk2_ui_element::OnContextMenu(CWindow wnd, CPoint point)
 
     switch (cmd)
     {
+        case IDM_OPEN_PRESET_LOCATION:
+            OpenCurrentPresetLocation();
+            break;
         case IDM_TOGGLE_FULLSCREEN:
             if (g_plugin.GetFrame() > 0)
                 ToggleFullScreen();
+            break;
+        case IDM_TOGGLE_POPOUT:
+            TogglePopout();
             break;
         case IDM_NEXT_PRESET:
             NextPreset();
@@ -701,8 +931,14 @@ void milk2_ui_element::OnContextMenu(CWindow wnd, CPoint point)
         case IDM_LOCK_PRESET:
             LockPreset(!IsPresetLock());
             break;
+        case IDM_BLACKLIST_PRESET:
+            BlacklistCurrentPreset();
+            break;
         case IDM_SHUFFLE_PRESET:
             RandomPreset();
+            break;
+        case IDM_LOAD_PRESET_FILE:
+            LoadPresetFromFile();
             break;
         case IDM_ENABLE_DOWNMIX:
             s_config.settings.m_bEnableDownmix = !s_config.settings.m_bEnableDownmix;
@@ -759,7 +995,7 @@ LRESULT milk2_ui_element::OnImeNotify(UINT uMsg, WPARAM wParam, LPARAM lParam)
         return 1;
     if (wParam == IMN_CLOSESTATUSWINDOW)
     {
-        if (s_fullscreen && !s_in_toggle)
+        if ((s_fullscreen || s_popout_fullscreen) && !s_in_toggle)
             ToggleFullScreen();
     }
     return 0;
@@ -779,6 +1015,17 @@ LRESULT milk2_ui_element::OnMilk2Message(UINT uMsg, WPARAM wParam, LPARAM lParam
 {
     if (uMsg != WM_MILK2)
         return -1;
+
+    if (wParam == MILK2_WPARAM_REFRESH_PRESET_LIST)
+    {
+        g_plugin.UpdatePresetList(false, true, true);
+        return 0;
+    }
+    if (wParam == MILK2_WPARAM_RANDOM_PRESET)
+    {
+        RandomPreset(0.0f);
+        return 0;
+    }
 
     auto api = playlist_manager::get();
     if (LOBYTE(wParam) == 0x21 && HIBYTE(wParam) == 0x09)
@@ -978,11 +1225,21 @@ LRESULT milk2_ui_element::OnRenderMessage(UINT uMsg, WPARAM wParam, LPARAM lPara
 #ifdef TIMER_TP
     m_renderPending = false;
     m_renderPostTick = 0;
-    m_nextFrameQpc = 0;
 #endif
+    LONGLONG renderQpc = 0;
+    bool rendered = false;
     if (m_milk2)
-        Tick();
+    {
 #ifdef TIMER_TP
+        if (!TryBeginFrame(renderQpc))
+            return 0;
+#endif
+        Tick();
+        rendered = true;
+    }
+#ifdef TIMER_TP
+    if (m_milk2 && rendered)
+        FinishFrameTiming(renderQpc);
     if (m_milk2)
         ScheduleNextFrameTimer();
 #endif
@@ -998,7 +1255,7 @@ LRESULT milk2_ui_element::OnRestoreWindowed(UINT uMsg, WPARAM wParam, LPARAM lPa
     if (uMsg != WM_MILK2_RESTORE_WINDOWED)
         return -1;
 
-    if (s_fullscreen || m_milk2)
+    if (s_fullscreen || s_popout_fullscreen || m_milk2)
         return 0;
 
     int w, h;
@@ -1029,7 +1286,7 @@ LRESULT milk2_ui_element::OnRepairWindowedD3D12(UINT uMsg, WPARAM wParam, LPARAM
     if (uMsg != WM_MILK2_REPAIR_WINDOWED_DX12)
         return -1;
 
-    if (s_fullscreen || !m_milk2 || !g_plugin.IsD3D12Active())
+    if (s_fullscreen || s_popout_fullscreen || !m_milk2 || !g_plugin.IsD3D12Active())
         return 0;
 
     CRect r{};
@@ -1074,6 +1331,15 @@ LRESULT milk2_ui_element::OnConfigurationChange(UINT uMsg, WPARAM wParam, LPARAM
                 m_script.reset();
                 g_plugin.PanelSettings(&s_config.settings);
                 ApplyFrameRateLimit();
+                if (s_popout && !s_popout_fullscreen)
+                {
+                    const DWORD baseStyle = WS_CLIPSIBLINGS | WS_CLIPCHILDREN;
+                    const DWORD style = s_config.settings.m_bPopoutBorderless ? (WS_POPUP | baseStyle) : (WS_OVERLAPPEDWINDOW | baseStyle);
+                    ::SetWindowLongPtr(get_wnd(), GWL_STYLE, static_cast<LONG_PTR>(style));
+                    ::SetWindowLongPtr(get_wnd(), GWL_EXSTYLE, static_cast<LONG_PTR>(WS_EX_APPWINDOW));
+                    ::SetWindowPos(get_wnd(), nullptr, 0, 0, 0, 0,
+                                   SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+                }
 #ifdef TIMER_TP
                 StartTimer();
 #endif
@@ -1111,11 +1377,12 @@ bool milk2_ui_element::Initialize(HWND window, int width, int height)
 
         swprintf_s(g_plugin.m_szComponentDirPath, L"%ls", const_cast<wchar_t*>(m_pwd.c_str()));
         g_plugin.SetWinampWindow(window);
-        g_plugin.SetScreenMode(s_fullscreen ? FULLSCREEN : WINDOWED);
+        g_plugin.SetScreenMode((s_fullscreen || s_popout_fullscreen) ? FULLSCREEN : WINDOWED);
         ApplyFrameRateLimit();
 
         if (FALSE == g_plugin.PluginInitialize(width, height))
             return false;
+        g_plugin.SetFoobarPlaybackActive(m_playback_control->is_playing() && !m_playback_control->is_paused());
         if (g_plugin.IsD3D12Active())
         {
             g_plugin.RestoreD3D12VisualState();
@@ -1133,7 +1400,7 @@ bool milk2_ui_element::Initialize(HWND window, int width, int height)
 
     if (!s_milk2)
     {
-        if (!s_fullscreen)
+        if (!s_fullscreen && !s_popout_fullscreen)
             g_hWindow = get_wnd();
     }
 
@@ -1151,7 +1418,7 @@ bool milk2_ui_element::Initialize(HWND window, int width, int height)
         if (rebuildD3D12)
         {
             g_plugin.CaptureD3D12VisualState();
-            if (!g_plugin.RestartD3D12ForWindow(window, width, height, s_fullscreen ? FULLSCREEN : WINDOWED))
+            if (!g_plugin.RestartD3D12ForWindow(window, width, height, (s_fullscreen || s_popout_fullscreen) ? FULLSCREEN : WINDOWED))
             {
 #ifdef TIMER_TP
                 LeaveCriticalSection(&s_cs);
@@ -1164,7 +1431,7 @@ bool milk2_ui_element::Initialize(HWND window, int width, int height)
         else
         {
             g_plugin.SetWinampWindow(window);
-            g_plugin.SetScreenMode(s_fullscreen ? FULLSCREEN : WINDOWED);
+            g_plugin.SetScreenMode((s_fullscreen || s_popout_fullscreen) ? FULLSCREEN : WINDOWED);
             g_plugin.OnWindowSwap(window, width, height);
             g_plugin.ResumeD3D12AfterWindowSwap();
         }
@@ -1175,13 +1442,15 @@ bool milk2_ui_element::Initialize(HWND window, int width, int height)
     }
 
     m_milk2 = true;
+    ApplyFrameRateLimit();
+    UpdateFoobarPlaybackState();
 #ifdef TIMER_TP
     m_renderPending = false;
     m_renderPostTick = 0;
     StartTimer();
     ::PostMessage(get_wnd(), WM_MILK2_RENDER, 0, 0);
 #endif
-    if (!s_fullscreen && g_plugin.IsD3D12Active())
+    if (!s_fullscreen && !s_popout_fullscreen && g_plugin.IsD3D12Active())
         ::SetTimer(get_wnd(), WM_MILK2_REPAIR_WINDOWED_DX12, 250, nullptr);
 
     return true;
@@ -1208,6 +1477,7 @@ void milk2_ui_element::Tick()
     m_timer.Tick([&]() { Update(m_timer); });
 #endif
 
+    FlushPendingAnimatedText();
     Render();
 
 #ifdef TIMER_TP
@@ -1263,9 +1533,20 @@ void milk2_ui_element::BuildWaves()
     //if (!m_vis_stream.is_valid())
     //    return;
 
+    if (!m_playback_control->is_playing() || m_playback_control->is_paused())
+    {
+        std::fill(waves[0].begin(), waves[0].end(), 0.0f);
+        std::fill(waves[1].begin(), waves[1].end(), 0.0f);
+        return;
+    }
+
     double time;
     if (!m_vis_stream->get_absolute_time(time))
+    {
+        std::fill(waves[0].begin(), waves[0].end(), 0.0f);
+        std::fill(waves[1].begin(), waves[1].end(), 0.0f);
         return;
+    }
 
     double dt = time - m_last_time;
     m_last_time = time;
@@ -1345,17 +1626,16 @@ void milk2_ui_element::SetPwd(std::wstring pwd) noexcept
 
 void milk2_ui_element::ApplyFrameRateLimit() noexcept
 {
-    m_refresh_interval = get_refresh_interval_ms(s_config.settings.m_max_fps_fs);
+    uint32_t maxFps = normalize_frame_limit(s_config.settings.m_max_fps_fs);
+    if (s_config.settings.m_max_fps_fs != maxFps)
+        s_config.settings.m_max_fps_fs = maxFps;
+
+    m_refresh_interval = get_refresh_interval_ms(maxFps);
 #ifdef TIMER_TP
     LONGLONG frameInterval = 0;
     if (m_frameTimerFrequencyQpc > 0)
     {
-        const uint32_t maxFps = s_config.settings.m_max_fps_fs;
-        if (maxFps == 0)
-        {
-            frameInterval = (std::max)(1LL, m_frameTimerFrequencyQpc / 1000LL);
-        }
-        else
+        if (maxFps != 0)
         {
             const LONGLONG fps = static_cast<LONGLONG>(maxFps);
             frameInterval = (std::max)(1LL, (m_frameTimerFrequencyQpc + fps / 2) / fps);
@@ -1363,13 +1643,95 @@ void milk2_ui_element::ApplyFrameRateLimit() noexcept
     }
     m_frameIntervalQpc = frameInterval;
     m_nextFrameQpc = 0;
+    m_lastRenderQpc = 0;
+    ResetFrameTimingStats();
+    SetFrameTimerResolution(m_milk2 && (maxFps == 0 || frameInterval > 0));
+
+    wchar_t logLine[256]{};
+    swprintf_s(logLine,
+               L"frame limiter mode=%ls target=%u interval_qpc=%lld timer_resolution=%d",
+               L"capped",
+               maxFps,
+               frameInterval,
+               m_timerResolutionActive ? 1 : 0);
+    write_dx12_ui_log_line(logLine);
 #endif
-    g_plugin.SetFoobarFullscreenFrameLimit(s_fullscreen ? s_config.settings.m_max_fps_fs : 0);
+
+    // The foobar UI scheduler owns frame pacing. Keep the legacy shell sleep
+    // limiter disabled so it cannot double-throttle fullscreen frames.
+    g_plugin.SetFoobarFullscreenFrameLimit(0);
+}
+
+void milk2_ui_element::ResizePluginToCurrentClient(const char* context, bool wait_for_lock) noexcept
+{
+    UNREFERENCED_PARAMETER(context);
+
+    RECT rect{};
+    if (!::GetClientRect(get_wnd(), &rect))
+        return;
+
+    int width = rect.right - rect.left;
+    int height = rect.bottom - rect.top;
+    if (width <= 0 || height <= 0)
+        return;
+
+    width = std::max<int>(width, 128);
+    height = std::max<int>(height, 128);
+    const eScrMode screenMode = (s_fullscreen || s_popout_fullscreen) ? FULLSCREEN : WINDOWED;
+
+#ifdef TIMER_TP
+    bool lockHeld = false;
+    if (wait_for_lock)
+    {
+        EnterCriticalSection(&s_cs);
+        lockHeld = true;
+    }
+    else if (TryEnterCriticalSection(&s_cs) != 0)
+    {
+        lockHeld = true;
+    }
+    else
+    {
+        return;
+    }
+#endif
+
+    g_plugin.SetWinampWindow(get_wnd());
+    g_plugin.SetScreenMode(screenMode);
+    if (g_plugin.IsD3D12Active())
+    {
+        g_plugin.CaptureD3D12VisualState();
+        if (g_plugin.RestartD3D12ForWindow(get_wnd(), width, height, screenMode))
+        {
+            g_plugin.RestoreD3D12VisualState();
+            g_plugin.ResumeD3D12AfterWindowSwap();
+        }
+        else
+        {
+            g_plugin.OnWindowSizeChanged(width, height);
+        }
+    }
+    else
+    {
+        g_plugin.OnWindowMoved();
+        g_plugin.OnWindowSizeChanged(width, height);
+    }
+
+#ifdef TIMER_TP
+    if (lockHeld)
+        LeaveCriticalSection(&s_cs);
+#endif
 }
 
 void milk2_ui_element::ToggleFullScreen()
 {
     MILK2_CONSOLE_LOG("ToggleFullScreen0 ", GetWnd())
+    if (s_popout)
+    {
+        TogglePopoutFullscreen();
+        return;
+    }
+
     if (m_milk2)
     {
         const bool enteringFullscreen = !s_fullscreen;
@@ -1380,11 +1742,7 @@ void milk2_ui_element::ToggleFullScreen()
 #ifdef TIMER_TP
         m_renderPending = false;
         m_renderPostTick = 0;
-        if (m_tpTimer != nullptr)
-        {
-            SetThreadpoolTimer(m_tpTimer, NULL, 0, 0);
-            WaitForThreadpoolTimerCallbacks(m_tpTimer, TRUE);
-        }
+        StopTimer();
 #endif
 #if 0
         if (s_fullscreen)
@@ -1520,22 +1878,71 @@ bool milk2_ui_element::LoadPreset(int select)
     return true;
 }
 
+void milk2_ui_element::LoadPresetFromFile()
+{
+    wchar_t selectedFile[MAX_PATH] = {0};
+    std::wstring currentPath = g_plugin.GetCurrentPresetPath();
+    if (!currentPath.empty() && currentPath.size() < std::size(selectedFile))
+    {
+        wcscpy_s(selectedFile, currentPath.c_str());
+    }
+
+    wchar_t initialDir[MAX_PATH] = {0};
+    const wchar_t* presetDir = g_plugin.GetPresetDir();
+    if (presetDir && presetDir[0])
+    {
+        wcscpy_s(initialDir, presetDir);
+    }
+
+    OPENFILENAME ofn = {};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = m_hWnd;
+    ofn.lpstrFile = selectedFile;
+    ofn.nMaxFile = static_cast<DWORD>(std::size(selectedFile));
+    ofn.lpstrInitialDir = initialDir[0] ? initialDir : nullptr;
+    ofn.lpstrFilter = L"MilkDrop presets (*.milk)\0*.milk\0All files (*.*)\0*.*\0";
+    ofn.lpstrDefExt = L"milk";
+    ofn.lpstrTitle = L"Load MilkDrop preset";
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY | OFN_NOCHANGEDIR;
+
+    if (!GetOpenFileName(&ofn))
+        return;
+
+    wchar_t logLine[MAX_PATH + 64]{};
+    swprintf_s(logLine, L"manual preset load file=\"%ls\"", selectedFile);
+    write_dx12_ui_log_line(logLine);
+
+    g_plugin.LoadPreset(selectedFile, 0.0f);
+    g_plugin.SetPresetListPosition(selectedFile);
+}
+
 std::wstring milk2_ui_element::GetCurrentPreset()
 {
-#ifdef _DEBUG
-    wchar_t buf[512]{};
-    swprintf_s(buf, L"%s", (g_plugin.m_nLoadingPreset != 0) ? g_plugin.m_pNewState->m_szDesc : g_plugin.m_pState->m_szDesc);
-    wcscat_s(buf, L".milk");
-    if (g_plugin.m_presets.size() == 0 || g_plugin.m_nCurrentPreset == -1)
-    {
-        MILK2_CONSOLE_LOG("No presets found")
-    }
-    else if (wcscmp(buf, g_plugin.m_presets[g_plugin.m_nCurrentPreset].szFilename.c_str()))
-    {
-        MILK2_CONSOLE_LOG("GetCurrentPreset Mismatch --> ", buf, " != ", g_plugin.m_presets[g_plugin.m_nCurrentPreset].szFilename.c_str())
-    }
-#endif
-    return g_plugin.m_nCurrentPreset != -1 ? g_plugin.m_presets[g_plugin.m_nCurrentPreset].szFilename : std::wstring();
+    return g_plugin.GetCurrentPresetFilename();
+}
+
+void milk2_ui_element::OpenCurrentPresetLocation()
+{
+    const std::wstring presetPath = g_plugin.GetCurrentPresetPath();
+    if (presetPath.empty())
+        return;
+
+    const std::wstring arguments = L"/select,\"" + presetPath + L"\"";
+    ShellExecute(m_hWnd, L"open", L"explorer.exe", arguments.c_str(), nullptr, SW_SHOWNORMAL);
+}
+
+void milk2_ui_element::BlacklistCurrentPreset()
+{
+    const std::wstring presetName = g_plugin.GetCurrentPresetFilename();
+    if (presetName.empty())
+        return;
+
+    if (!g_plugin.AddPresetToBlacklist(presetName))
+        return;
+
+    KillTimer(ID_BLACKLIST_TIMER);
+    m_blacklist_load_retries = 0;
+    SetTimer(ID_BLACKLIST_TIMER, 1, nullptr);
 }
 
 void milk2_ui_element::LockPreset(bool lockUnlock)
@@ -1608,7 +2015,250 @@ void milk2_ui_element::UpdateChannelMode()
         m_vis_stream->set_channel_mode(s_config.settings.m_bEnableDownmix ? visualisation_stream_v3::channel_mode_mono : visualisation_stream_v3::channel_mode_default);
     }
 }
+
+void milk2_ui_element::TogglePopout()
+{
+    if (s_popout)
+        ReturnPopoutToPanel();
+    else
+        OpenPopoutWindow();
+}
+
+void milk2_ui_element::OpenPopoutWindow()
+{
+    if (!m_milk2 || s_popout || s_fullscreen || !::IsWindow(get_wnd()))
+        return;
+
+    HWND hwnd = get_wnd();
+    HWND parent = ::GetParent(hwnd);
+    if (!parent || !::IsWindow(parent))
+        return;
+
+    RECT windowRect{};
+    RECT parentRect{};
+    if (!::GetWindowRect(hwnd, &windowRect))
+        return;
+
+    parentRect = windowRect;
+    ::MapWindowPoints(nullptr, parent, reinterpret_cast<POINT*>(&parentRect), 2);
+
+    int width = windowRect.right - windowRect.left;
+    int height = windowRect.bottom - windowRect.top;
+    width = (std::max)(width, 800);
+    height = (std::max)(height, 600);
+
+    HMONITOR monitor = ::MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO monitorInfo{};
+    monitorInfo.cbSize = sizeof(monitorInfo);
+    if (!::GetMonitorInfo(monitor, &monitorInfo))
+        monitorInfo.rcWork = {100, 100, 100 + width, 100 + height};
+
+    const int workWidth = monitorInfo.rcWork.right - monitorInfo.rcWork.left;
+    const int workHeight = monitorInfo.rcWork.bottom - monitorInfo.rcWork.top;
+    width = (std::min)(width, workWidth);
+    height = (std::min)(height, workHeight);
+    const int x = monitorInfo.rcWork.left + (workWidth - width) / 2;
+    const int y = monitorInfo.rcWork.top + (workHeight - height) / 2;
+
+    s_popout_parent = parent;
+    s_popout_panel_style = ::GetWindowLongPtr(hwnd, GWL_STYLE);
+    s_popout_panel_exstyle = ::GetWindowLongPtr(hwnd, GWL_EXSTYLE);
+    s_popout_panel_rect = parentRect;
+    s_popout_window_rect = {x, y, x + width, y + height};
+    s_popout = true;
+    s_popout_fullscreen = false;
+
+#ifdef TIMER_TP
+    m_renderPending = false;
+    m_renderPostTick = 0;
+    StopTimer();
+#endif
+
+    const DWORD baseStyle = WS_CLIPSIBLINGS | WS_CLIPCHILDREN;
+    const DWORD style = s_config.settings.m_bPopoutBorderless ? (WS_POPUP | baseStyle) : (WS_OVERLAPPEDWINDOW | baseStyle);
+    const DWORD exstyle = WS_EX_APPWINDOW;
+
+    ::SetParent(hwnd, nullptr);
+    ::SetWindowLongPtr(hwnd, GWL_STYLE, static_cast<LONG_PTR>(style));
+    ::SetWindowLongPtr(hwnd, GWL_EXSTYLE, static_cast<LONG_PTR>(exstyle));
+    ::SetWindowText(hwnd, L"MilkDrop");
+    ::SetWindowPos(hwnd, HWND_TOP, x, y, width, height, SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+    ::ShowWindow(hwnd, SW_SHOWNORMAL);
+    ::SetForegroundWindow(hwnd);
+    ::SetFocus(hwnd);
+
+    ApplyFrameRateLimit();
+    ResizePluginToCurrentClient("OpenPopoutWindow", true);
+
+#ifdef TIMER_TP
+    StartTimer();
+    ::PostMessage(get_wnd(), WM_MILK2_RENDER, 0, 0);
+#endif
+    InvalidateRect(nullptr, FALSE);
+}
+
+void milk2_ui_element::ReturnPopoutToPanel()
+{
+    if (!s_popout || !::IsWindow(get_wnd()))
+        return;
+
+    HWND hwnd = get_wnd();
+    if (!s_popout_fullscreen)
+        ::GetWindowRect(hwnd, &s_popout_window_rect);
+
+    HWND parent = s_popout_parent;
+    if (!parent || !::IsWindow(parent))
+    {
+        s_popout = false;
+        s_popout_fullscreen = false;
+        s_popout_parent = nullptr;
+        return;
+    }
+
+#ifdef TIMER_TP
+    m_renderPending = false;
+    m_renderPostTick = 0;
+    StopTimer();
+#endif
+
+    s_popout = false;
+    s_popout_fullscreen = false;
+    ::SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    ::SetWindowLongPtr(hwnd, GWL_STYLE, s_popout_panel_style);
+    ::SetWindowLongPtr(hwnd, GWL_EXSTYLE, s_popout_panel_exstyle);
+    ::SetParent(hwnd, parent);
+    ::SetWindowText(hwnd, SHORTNAME);
+
+    const int width = (std::max)(1L, s_popout_panel_rect.right - s_popout_panel_rect.left);
+    const int height = (std::max)(1L, s_popout_panel_rect.bottom - s_popout_panel_rect.top);
+    ::SetWindowPos(hwnd,
+                   HWND_TOP,
+                   s_popout_panel_rect.left,
+                   s_popout_panel_rect.top,
+                   width,
+                   height,
+                   SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+    s_popout_parent = nullptr;
+
+    ApplyFrameRateLimit();
+    ResizePluginToCurrentClient("ReturnPopoutToPanel", true);
+
+#ifdef TIMER_TP
+    StartTimer();
+    ::PostMessage(get_wnd(), WM_MILK2_RENDER, 0, 0);
+#endif
+    InvalidateRect(nullptr, FALSE);
+}
+
+void milk2_ui_element::TogglePopoutFullscreen()
+{
+    if (!s_popout || !m_milk2 || !::IsWindow(get_wnd()))
+        return;
+
+    HWND hwnd = get_wnd();
+
+#ifdef TIMER_TP
+    m_renderPending = false;
+    m_renderPostTick = 0;
+    StopTimer();
+#endif
+
+    const DWORD baseStyle = WS_CLIPSIBLINGS | WS_CLIPCHILDREN;
+    if (!s_popout_fullscreen)
+    {
+        ::GetWindowRect(hwnd, &s_popout_window_rect);
+        HMONITOR monitor = ::MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        MONITORINFO monitorInfo{};
+        monitorInfo.cbSize = sizeof(monitorInfo);
+        if (!::GetMonitorInfo(monitor, &monitorInfo))
+            monitorInfo.rcMonitor = s_popout_window_rect;
+
+        s_popout_fullscreen = true;
+        ::SetWindowLongPtr(hwnd, GWL_STYLE, static_cast<LONG_PTR>(WS_POPUP | baseStyle));
+        ::SetWindowLongPtr(hwnd, GWL_EXSTYLE, static_cast<LONG_PTR>(WS_EX_APPWINDOW));
+        ::SetWindowPos(hwnd,
+                       HWND_TOPMOST,
+                       monitorInfo.rcMonitor.left,
+                       monitorInfo.rcMonitor.top,
+                       monitorInfo.rcMonitor.right - monitorInfo.rcMonitor.left,
+                       monitorInfo.rcMonitor.bottom - monitorInfo.rcMonitor.top,
+                       SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+    }
+    else
+    {
+        s_popout_fullscreen = false;
+        const DWORD style = s_config.settings.m_bPopoutBorderless ? (WS_POPUP | baseStyle) : (WS_OVERLAPPEDWINDOW | baseStyle);
+        ::SetWindowLongPtr(hwnd, GWL_STYLE, static_cast<LONG_PTR>(style));
+        ::SetWindowLongPtr(hwnd, GWL_EXSTYLE, static_cast<LONG_PTR>(WS_EX_APPWINDOW));
+        ::SetWindowPos(hwnd,
+                       HWND_NOTOPMOST,
+                       s_popout_window_rect.left,
+                       s_popout_window_rect.top,
+                       s_popout_window_rect.right - s_popout_window_rect.left,
+                       s_popout_window_rect.bottom - s_popout_window_rect.top,
+                       SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+    }
+
+    ApplyFrameRateLimit();
+    ResizePluginToCurrentClient("TogglePopoutFullscreen", true);
+    ::SetForegroundWindow(hwnd);
+    ::SetFocus(hwnd);
+
+#ifdef TIMER_TP
+    StartTimer();
+    ::PostMessage(get_wnd(), WM_MILK2_RENDER, 0, 0);
+#endif
+    InvalidateRect(nullptr, FALSE);
+}
 // clang-format on
+
+void milk2_ui_element::UpdateFoobarPlaybackState()
+{
+    const bool active = m_playback_control->is_playing() && !m_playback_control->is_paused();
+#ifdef TIMER_TP
+    const bool lock = s_cs_initialized;
+    if (lock)
+        EnterCriticalSection(&s_cs);
+#endif
+    g_plugin.SetFoobarPlaybackActive(active);
+#ifdef TIMER_TP
+    if (lock)
+        LeaveCriticalSection(&s_cs);
+#endif
+}
+
+void milk2_ui_element::on_playback_starting(play_control::t_track_command /*p_command*/, bool /*p_paused*/)
+{
+    MILK2_CONSOLE_LOG("+ PlaybackStart")
+    UpdateFoobarPlaybackState();
+    UpdateTrack();
+}
+
+void milk2_ui_element::on_playback_new_track(metadb_handle_ptr p_track)
+{
+    MILK2_CONSOLE_LOG("+ PlaybackNew")
+    UpdateFoobarPlaybackState();
+    UpdateTrack(p_track);
+    QueueSongTitle();
+}
+
+void milk2_ui_element::on_playback_stop(play_control::t_stop_reason /*p_reason*/)
+{
+    MILK2_CONSOLE_LOG("+ PlaybackStop")
+    UpdateFoobarPlaybackState();
+    UpdateTrack();
+}
+
+void milk2_ui_element::on_playback_pause(bool p_state)
+{
+    MILK2_CONSOLE_LOG("+ PlaybackPause")
+    UpdateFoobarPlaybackState();
+    UpdateTrack();
+    if (p_state)
+        QueueStatusText(L"Paused", 1.6f, 0.35f, SONGTITLE_FONT);
+    else if (m_playback_control->is_playing())
+        QueueSongTitle();
+}
 
 void milk2_ui_element::UpdateTrack()
 {
@@ -1713,6 +2363,93 @@ void milk2_ui_element::LaunchSongTitle()
     g_plugin.LaunchSongTitleAnim();
 }
 
+void milk2_ui_element::QueueStatusText(const wchar_t* text, float duration, float fadeTime, int fontIndex)
+{
+    if (!text || text[0] == L'\0')
+        return;
+
+    std::lock_guard<std::mutex> lock(m_pending_animated_text_mutex);
+    m_pending_animated_text_kind = pending_animated_text_kind::status;
+    m_pending_animated_status_text = text;
+    m_pending_animated_status_duration = duration;
+    m_pending_animated_status_fade_time = fadeTime;
+    m_pending_animated_status_font = fontIndex;
+}
+
+bool milk2_ui_element::ConsumeClickPauseConfirmation(DWORD now) noexcept
+{
+    if (!m_click_pause_confirmation_pending)
+        return false;
+
+    if (now - m_click_pause_confirmation_tick > ID_CLICK_CONFIRM_TIMEOUT_MS)
+    {
+        m_click_pause_confirmation_pending = false;
+        return false;
+    }
+
+    m_click_pause_confirmation_required = false;
+    m_click_pause_confirmation_pending = false;
+    return true;
+}
+
+void milk2_ui_element::QueueClickPauseConfirmation(DWORD now)
+{
+    m_click_pause_confirmation_required = false;
+    m_click_pause_confirmation_pending = true;
+    m_click_pause_confirmation_tick = now;
+
+    if (!m_playback_control->is_playing())
+        QueueStatusText(L"Click again to play", 2.4f, 0.35f, SONGTITLE_FONT);
+    else if (m_playback_control->is_paused())
+        QueueStatusText(L"Click again to resume", 2.4f, 0.35f, SONGTITLE_FONT);
+    else
+        QueueStatusText(L"Click again to pause", 2.4f, 0.35f, SONGTITLE_FONT);
+}
+
+void milk2_ui_element::QueueSongTitle()
+{
+    std::lock_guard<std::mutex> lock(m_pending_animated_text_mutex);
+    m_pending_animated_text_kind = pending_animated_text_kind::song_title;
+    m_pending_animated_status_text.clear();
+}
+
+void milk2_ui_element::FlushPendingAnimatedText()
+{
+    pending_animated_text_kind kind = pending_animated_text_kind::none;
+    std::wstring statusText;
+    float duration = 1.6f;
+    float fadeTime = 0.35f;
+    int fontIndex = SONGTITLE_FONT;
+
+    {
+        std::lock_guard<std::mutex> lock(m_pending_animated_text_mutex);
+        kind = m_pending_animated_text_kind;
+        if (kind == pending_animated_text_kind::none)
+            return;
+
+        statusText = m_pending_animated_status_text;
+        duration = m_pending_animated_status_duration;
+        fadeTime = m_pending_animated_status_fade_time;
+        fontIndex = m_pending_animated_status_font;
+        m_pending_animated_text_kind = pending_animated_text_kind::none;
+        m_pending_animated_status_text.clear();
+    }
+
+    if (kind == pending_animated_text_kind::song_title)
+        g_plugin.LaunchSongTitleAnim();
+    else if (!statusText.empty())
+        g_plugin.LaunchStatusText(statusText.c_str(), duration, fadeTime, static_cast<eFontIndex>(fontIndex));
+}
+
+bool milk2_ui_element::LaunchStatusText(const wchar_t* text, float duration, float fadeTime, int fontIndex)
+{
+    if (!text || text[0] == L'\0')
+        return false;
+
+    g_plugin.LaunchStatusText(text, duration, fadeTime, static_cast<eFontIndex>(fontIndex));
+    return true;
+}
+
 #ifdef TIMER_TP
 // Starts the timer.
 void milk2_ui_element::StartTimer() noexcept
@@ -1720,10 +2457,20 @@ void milk2_ui_element::StartTimer() noexcept
     MILK2_CONSOLE_LOG_LIMIT("StartTimer ", GetWnd())
     if (!m_milk2)
         return;
-    if (m_tpTimer == nullptr)
-        m_tpTimer = CreateThreadpoolTimer(TimerCallback, this, NULL);
-    if (m_tpTimer == nullptr)
+
+    SetFrameTimerResolution(true);
+    if (m_framePacerStopEvent == nullptr)
+        m_framePacerStopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (m_framePacerWakeEvent == nullptr)
+        m_framePacerWakeEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (m_framePacerStopEvent == nullptr || m_framePacerWakeEvent == nullptr)
+    {
         return;
+    }
+
+    ResetEvent(m_framePacerStopEvent);
+    if (m_framePacerThread == nullptr)
+        m_framePacerThread = CreateThread(nullptr, 0, FramePacerThreadProc, this, 0, nullptr);
 
     ScheduleNextFrameTimer();
 }
@@ -1732,113 +2479,269 @@ void milk2_ui_element::StartTimer() noexcept
 void milk2_ui_element::StopTimer() noexcept
 {
     MILK2_CONSOLE_LOG_LIMIT("StopTimer ", GetWnd())
-    if (m_tpTimer == nullptr)
-        return;
+    if (m_framePacerStopEvent != nullptr)
+        SetEvent(m_framePacerStopEvent);
+    if (m_framePacerWakeEvent != nullptr)
+        SetEvent(m_framePacerWakeEvent);
 
-    SetThreadpoolTimer(m_tpTimer, NULL, 0, 0);
-    WaitForThreadpoolTimerCallbacks(m_tpTimer, TRUE);
-    CloseThreadpoolTimer(m_tpTimer);
-    m_tpTimer = nullptr;
+    if (m_framePacerThread != nullptr)
+    {
+        WaitForSingleObject(m_framePacerThread, INFINITE);
+        CloseHandle(m_framePacerThread);
+        m_framePacerThread = nullptr;
+    }
+    if (m_framePacerWakeEvent != nullptr)
+    {
+        CloseHandle(m_framePacerWakeEvent);
+        m_framePacerWakeEvent = nullptr;
+    }
+    if (m_framePacerStopEvent != nullptr)
+    {
+        CloseHandle(m_framePacerStopEvent);
+        m_framePacerStopEvent = nullptr;
+    }
     m_nextFrameQpc = 0;
+    m_lastRenderQpc = 0;
+    m_renderPending = false;
+    m_renderPostTick = 0;
+    ResetFrameTimingStats();
+    SetFrameTimerResolution(false);
 }
 
 void milk2_ui_element::ScheduleNextFrameTimer() noexcept
 {
-    if (m_tpTimer == nullptr || !m_milk2)
-        return;
-
-    const LONGLONG frameInterval = m_frameIntervalQpc.load(std::memory_order_relaxed);
-    if (frameInterval <= 0 || m_frameTimerFrequencyQpc <= 0)
-    {
-        FILETIME dueTime{};
-        SetThreadpoolTimer(m_tpTimer, &dueTime, m_refresh_interval, 0);
-        return;
-    }
-
-    LARGE_INTEGER nowValue{};
-    if (!QueryPerformanceCounter(&nowValue))
-    {
-        FILETIME dueTime{};
-        SetThreadpoolTimer(m_tpTimer, &dueTime, m_refresh_interval, 0);
-        return;
-    }
-
-    const LONGLONG now = nowValue.QuadPart;
-    LONGLONG nextFrame = m_nextFrameQpc.load(std::memory_order_relaxed);
-    if (nextFrame <= 0 || nextFrame < now - frameInterval)
-    {
-        nextFrame = now + frameInterval;
-        m_nextFrameQpc.store(nextFrame, std::memory_order_relaxed);
-    }
-
-    const LONGLONG dueTicks = (std::max)(0LL, nextFrame - now);
-    const LONGLONG due100ns = dueTicks > 0
-                                  ? (std::max)(1LL, (dueTicks * 10000000LL + m_frameTimerFrequencyQpc - 1) / m_frameTimerFrequencyQpc)
-                                  : 1LL;
-    FILETIME dueTime = make_relative_threadpool_due_time(due100ns);
-    SetThreadpoolTimer(m_tpTimer, &dueTime, 0, 0);
+    if (m_framePacerWakeEvent != nullptr)
+        SetEvent(m_framePacerWakeEvent);
 }
 
-void milk2_ui_element::AdvanceFrameTimerDeadline() noexcept
+DWORD WINAPI milk2_ui_element::FramePacerThreadProc(LPVOID context) noexcept
 {
-    const LONGLONG frameInterval = m_frameIntervalQpc.load(std::memory_order_relaxed);
-    if (frameInterval <= 0 || m_frameTimerFrequencyQpc <= 0)
+    auto* element = static_cast<milk2_ui_element*>(context);
+    if (element != nullptr)
+        element->FramePacerThreadLoop();
+    return 0;
+}
+
+void milk2_ui_element::FramePacerThreadLoop() noexcept
+{
+    HANDLE waits[2] = {m_framePacerStopEvent, m_framePacerWakeEvent};
+    if (waits[0] == nullptr || waits[1] == nullptr)
         return;
 
-    LARGE_INTEGER nowValue{};
-    if (!QueryPerformanceCounter(&nowValue))
+    for (;;)
+    {
+        if (WaitForSingleObject(waits[0], 0) == WAIT_OBJECT_0)
+            return;
+
+        if (!m_milk2 || !::IsWindow(get_wnd()))
+        {
+            const DWORD waitResult = WaitForMultipleObjects(2, waits, FALSE, 50);
+            if (waitResult == WAIT_OBJECT_0)
+                return;
+            continue;
+        }
+
+        const LONGLONG frameInterval = m_frameIntervalQpc.load(std::memory_order_relaxed);
+        if (frameInterval > 0 && m_frameTimerFrequencyQpc > 0)
+        {
+            for (;;)
+            {
+                LARGE_INTEGER nowValue{};
+                if (!QueryPerformanceCounter(&nowValue))
+                    break;
+
+                const LONGLONG now = nowValue.QuadPart;
+                LONGLONG nextFrame = m_nextFrameQpc.load(std::memory_order_relaxed);
+                if (nextFrame <= 0 || nextFrame < now - frameInterval)
+                {
+                    nextFrame = now + frameInterval;
+                    m_nextFrameQpc.store(nextFrame, std::memory_order_relaxed);
+                }
+
+                const LONGLONG ticksUntilFrame = nextFrame - now;
+                if (ticksUntilFrame <= 0)
+                    break;
+
+                const DWORD waitMs = static_cast<DWORD>((ticksUntilFrame * 1000LL) / m_frameTimerFrequencyQpc);
+                if (waitMs > 2)
+                {
+                    const DWORD waitResult = WaitForMultipleObjects(2, waits, FALSE, waitMs - 1);
+                    if (waitResult == WAIT_OBJECT_0)
+                        return;
+                    if (waitResult == WAIT_OBJECT_0 + 1)
+                        break;
+                    continue;
+                }
+
+                SwitchToThread();
+            }
+        }
+        else
+        {
+            m_nextFrameQpc = 0;
+            const DWORD waitResult = WaitForMultipleObjects(2, waits, FALSE, 1);
+            if (waitResult == WAIT_OBJECT_0)
+                return;
+        }
+
+        if (!QueueRenderMessage())
+        {
+            const DWORD waitResult = WaitForMultipleObjects(2, waits, FALSE, 1);
+            if (waitResult == WAIT_OBJECT_0)
+                return;
+        }
+    }
+}
+
+bool milk2_ui_element::TryBeginFrame(LONGLONG& renderQpc) noexcept
+{
+    renderQpc = 0;
+    if (m_frameTimerFrequencyQpc > 0)
+    {
+        LARGE_INTEGER nowValue{};
+        if (QueryPerformanceCounter(&nowValue))
+            renderQpc = nowValue.QuadPart;
+    }
+
+    const LONGLONG frameInterval = m_frameIntervalQpc.load(std::memory_order_relaxed);
+    if (frameInterval <= 0 || m_frameTimerFrequencyQpc <= 0)
+    {
+        m_nextFrameQpc = 0;
+        return true;
+    }
+
+    if (renderQpc <= 0)
+    {
+        m_nextFrameQpc = 0;
+        return true;
+    }
+
+    LONGLONG nextFrame = m_nextFrameQpc.load(std::memory_order_relaxed);
+    if (nextFrame > 0 && renderQpc < nextFrame)
+    {
+        ScheduleNextFrameTimer();
+        return false;
+    }
+
+    return true;
+}
+
+void milk2_ui_element::FinishFrameTiming(LONGLONG renderQpc) noexcept
+{
+    if (renderQpc <= 0 && m_frameTimerFrequencyQpc > 0)
+    {
+        LARGE_INTEGER nowValue{};
+        if (QueryPerformanceCounter(&nowValue))
+            renderQpc = nowValue.QuadPart;
+    }
+
+    if (renderQpc > 0)
+    {
+        m_lastRenderQpc.store(renderQpc, std::memory_order_relaxed);
+        RecordFrameCadence(renderQpc);
+    }
+
+    const LONGLONG frameInterval = m_frameIntervalQpc.load(std::memory_order_relaxed);
+    if (frameInterval <= 0 || m_frameTimerFrequencyQpc <= 0 || renderQpc <= 0)
     {
         m_nextFrameQpc = 0;
         return;
     }
 
-    const LONGLONG now = nowValue.QuadPart;
-    LONGLONG nextFrame = m_nextFrameQpc.load(std::memory_order_relaxed);
-    if (nextFrame <= 0)
-        nextFrame = now;
-
-    do
+    LONGLONG nextFrame = renderQpc + frameInterval;
+    LARGE_INTEGER nowValue{};
+    if (QueryPerformanceCounter(&nowValue))
     {
-        nextFrame += frameInterval;
-    } while (nextFrame <= now);
-
+        while (nextFrame <= nowValue.QuadPart)
+            nextFrame += frameInterval;
+    }
     m_nextFrameQpc.store(nextFrame, std::memory_order_relaxed);
 }
 
-// Handles a timer tick.
-VOID CALLBACK milk2_ui_element::TimerCallback(PTP_CALLBACK_INSTANCE Instance, PVOID Context, PTP_TIMER Timer) noexcept
+void milk2_ui_element::ResetFrameTimingStats() noexcept
 {
-    UNREFERENCED_PARAMETER(Instance);
-    UNREFERENCED_PARAMETER(Timer);
+    m_frameStatsStartQpc = 0;
+    m_frameStatsCount = 0;
+}
 
-    auto* element = static_cast<milk2_ui_element*>(Context);
-    if (element == nullptr || !element->m_milk2)
+void milk2_ui_element::RecordFrameCadence(LONGLONG renderQpc) noexcept
+{
+    if (renderQpc <= 0 || m_frameTimerFrequencyQpc <= 0)
         return;
 
-    const DWORD now = GetTickCount();
-    const DWORD postedAt = element->m_renderPostTick.load();
-    if (element->m_renderPending && postedAt != 0 && now - postedAt > 250)
+    const LONGLONG startQpc = m_frameStatsStartQpc.load(std::memory_order_relaxed);
+    if (startQpc <= 0 || renderQpc <= startQpc)
     {
-        element->m_renderPending = false;
-        element->m_renderPostTick = 0;
+        m_frameStatsStartQpc.store(renderQpc, std::memory_order_relaxed);
+        m_frameStatsCount = 0;
+        return;
+    }
+
+    const unsigned int renderedFrames = m_frameStatsCount.fetch_add(1, std::memory_order_relaxed) + 1;
+    const LONGLONG elapsedQpc = renderQpc - startQpc;
+    if (elapsedQpc < m_frameTimerFrequencyQpc)
+        return;
+
+    const double actualFps = static_cast<double>(renderedFrames) * static_cast<double>(m_frameTimerFrequencyQpc) / static_cast<double>(elapsedQpc);
+    const uint32_t targetFps = normalize_frame_limit(s_config.settings.m_max_fps_fs);
+    wchar_t logLine[256]{};
+    swprintf_s(logLine,
+               L"render cadence actual=%.1f target=%u frames=%u screen=%ls",
+               actualFps,
+               targetFps,
+               renderedFrames,
+               (s_fullscreen || s_popout_fullscreen) ? L"fullscreen" : L"windowed");
+    write_dx12_ui_log_line(logLine);
+
+    m_frameStatsStartQpc.store(renderQpc, std::memory_order_relaxed);
+    m_frameStatsCount = 0;
+}
+
+bool milk2_ui_element::QueueRenderMessage() noexcept
+{
+    if (!m_milk2 || !::IsWindow(get_wnd()))
+        return false;
+
+    const DWORD now = GetTickCount();
+    const DWORD postedAt = m_renderPostTick.load(std::memory_order_relaxed);
+    if (m_renderPending && postedAt != 0 && now - postedAt > 250)
+    {
+        m_renderPending = false;
+        m_renderPostTick = 0;
     }
 
     bool expected = false;
-    if (!element->m_renderPending.compare_exchange_strong(expected, true))
-    {
-        element->ScheduleNextFrameTimer();
-        return;
-    }
+    if (!m_renderPending.compare_exchange_strong(expected, true))
+        return false;
 
-    element->m_renderPostTick = now;
-    element->AdvanceFrameTimerDeadline();
-    if (!::PostMessage(element->get_wnd(), WM_MILK2_RENDER, 0, 0))
+    m_renderPostTick = now;
+    if (!::PostMessage(get_wnd(), WM_MILK2_RENDER, 0, 0))
     {
-        element->m_renderPending = false;
-        element->m_renderPostTick = 0;
-        element->ScheduleNextFrameTimer();
+        m_renderPending = false;
+        m_renderPostTick = 0;
+        return false;
+    }
+    return true;
+}
+
+void milk2_ui_element::SetFrameTimerResolution(bool enabled) noexcept
+{
+    if (enabled == m_timerResolutionActive)
+        return;
+
+    if (enabled)
+    {
+        if (call_winmm_timer_period("timeBeginPeriod"))
+            m_timerResolutionActive = true;
+    }
+    else
+    {
+        if (m_timerResolutionActive)
+            call_winmm_timer_period("timeEndPeriod");
+        m_timerResolutionActive = false;
     }
 }
+
 #endif
 
 #ifdef TIMER_DX

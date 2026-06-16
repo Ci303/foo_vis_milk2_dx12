@@ -86,15 +86,19 @@ class DXContext final
     bool SetTextureFiles(const wchar_t* const* textureFiles, size_t textureFileCount);
     void ClearTextureFiles();
     bool SetPresetTextureFiles(const wchar_t* const* textureFiles, size_t textureFileCount);
+    bool SetStandaloneTextureFiles(const wchar_t* const* textureFiles, size_t textureFileCount);
     void ClearPresetTextureOverride();
     bool SetD3D12PresetWarpShader(const void* bytecode, size_t bytecodeSize);
     void ClearD3D12PresetWarpShader();
     bool SetD3D12PresetCompositeShader(const void* bytecode, size_t bytecodeSize);
     void ClearD3D12PresetCompositeShader();
-    void SetD3D12PresetShaderRuntimeConstants(float time,
+    void SetD3D12PresetShaderRuntimeConstants(float presetTime,
+                                              float globalTime,
                                               float fps,
                                               float frame,
                                               float progress,
+                                              float canvasWidth,
+                                              float canvasHeight,
                                               float bass,
                                               float mids,
                                               float treble,
@@ -109,6 +113,7 @@ class DXContext final
                                               const float* rotMatrices);
     bool CaptureD3D12Frame(std::vector<uint8_t>* pixels, UINT* width, UINT* height);
     bool SetD3D12ResumeFeedback(UINT width, UINT height, const std::vector<uint8_t>& pixels);
+    void ResetD3D12VisualHistory();
     void SetD3D12TextOverlay(const wchar_t* topLeft,
                              const wchar_t* topRight,
                              const wchar_t* bottomLeft,
@@ -146,6 +151,8 @@ class DXContext final
                       float motionStretchX = 1.0f,
                       float motionStretchY = 1.0f,
                       float motionWarp = 0.0f,
+                      bool textureWrap = true,
+                      bool suppressVisualFeedback = false,
                       float echoAlpha = 0.0f,
                       float echoZoom = 2.0f,
                       int echoOrientation = 0,
@@ -195,7 +202,9 @@ class DXContext final
                       const DX::TextureWarpVertex* textureWarpVertices = nullptr,
                       size_t textureWarpVertexCount = 0,
                       int textureWarpGridX = 0,
-                      int textureWarpGridY = 0);
+                      int textureWarpGridY = 0,
+                      const DX::TextureWarpVertex* compositeVertices = nullptr,
+                      size_t compositeVertexCount = 0);
     void RestoreTarget();
     int GetBitDepth() const { return m_bpp; };
 

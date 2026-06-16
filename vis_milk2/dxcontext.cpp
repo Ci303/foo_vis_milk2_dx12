@@ -248,6 +248,11 @@ bool DXContext::SetPresetTextureFiles(const wchar_t* const* textureFiles, size_t
     return m_useD3D12 && m_d3d12Resources && m_d3d12Resources->SetPresetTextureFiles(textureFiles, textureFileCount);
 }
 
+bool DXContext::SetStandaloneTextureFiles(const wchar_t* const* textureFiles, size_t textureFileCount)
+{
+    return m_useD3D12 && m_d3d12Resources && m_d3d12Resources->SetStandaloneTextureFiles(textureFiles, textureFileCount);
+}
+
 void DXContext::ClearPresetTextureOverride()
 {
     if (m_useD3D12 && m_d3d12Resources)
@@ -282,10 +287,13 @@ void DXContext::ClearD3D12PresetCompositeShader()
     }
 }
 
-void DXContext::SetD3D12PresetShaderRuntimeConstants(float time,
+void DXContext::SetD3D12PresetShaderRuntimeConstants(float presetTime,
+                                                     float globalTime,
                                                      float fps,
                                                      float frame,
                                                      float progress,
+                                                     float canvasWidth,
+                                                     float canvasHeight,
                                                      float bass,
                                                      float mids,
                                                      float treble,
@@ -301,10 +309,13 @@ void DXContext::SetD3D12PresetShaderRuntimeConstants(float time,
 {
     if (m_useD3D12 && m_d3d12Resources)
     {
-        m_d3d12Resources->SetPresetShaderRuntimeConstants(time,
+        m_d3d12Resources->SetPresetShaderRuntimeConstants(presetTime,
+                                                          globalTime,
                                                           fps,
                                                           frame,
                                                           progress,
+                                                          canvasWidth,
+                                                          canvasHeight,
                                                           bass,
                                                           mids,
                                                           treble,
@@ -328,6 +339,14 @@ bool DXContext::CaptureD3D12Frame(std::vector<uint8_t>* pixels, UINT* width, UIN
 bool DXContext::SetD3D12ResumeFeedback(UINT width, UINT height, const std::vector<uint8_t>& pixels)
 {
     return m_useD3D12 && m_d3d12Resources && m_d3d12Resources->SetResumeFeedbackFromFrame(width, height, pixels);
+}
+
+void DXContext::ResetD3D12VisualHistory()
+{
+    if (m_useD3D12 && m_d3d12Resources)
+    {
+        m_d3d12Resources->ResetVisualHistory();
+    }
 }
 
 void DXContext::SetD3D12TextOverlay(const wchar_t* topLeft,
@@ -374,6 +393,8 @@ void DXContext::DrawWaveform(const float* left,
                              float motionStretchX,
                              float motionStretchY,
                              float motionWarp,
+                             bool textureWrap,
+                             bool suppressVisualFeedback,
                              float echoAlpha,
                              float echoZoom,
                              int echoOrientation,
@@ -423,7 +444,9 @@ void DXContext::DrawWaveform(const float* left,
                              const DX::TextureWarpVertex* textureWarpVertices,
                              size_t textureWarpVertexCount,
                              int textureWarpGridX,
-                             int textureWarpGridY)
+                             int textureWarpGridY,
+                             const DX::TextureWarpVertex* compositeVertices,
+                             size_t compositeVertexCount)
 {
     if (m_useD3D12)
     {
@@ -443,7 +466,7 @@ void DXContext::DrawWaveform(const float* left,
             m_d3d12ResizePending = false;
         }
 
-        m_d3d12Resources->DrawWaveform(left, right, spectrumLeft, spectrumRight, sampleCount, bass, mids, treble, waveR, waveG, waveB, waveA, waveScale, waveX, waveY, decay, zoom, rot, motionCenterX, motionCenterY, motionDX, motionDY, motionStretchX, motionStretchY, motionWarp, echoAlpha, echoZoom, echoOrientation, waveUseDots, waveThick, waveAdditive, waveBrighten, waveMode, waveParam, waveSmoothing, waveAlphaVolumeScale, darkenCenter, postGamma, postInvert, postBrighten, postDarken, postSolarize, postShaderAmount, postHueShaderColors, postBlurAmount, postBlurEdgeDarken, outerBorderSize, outerBorderR, outerBorderG, outerBorderB, outerBorderA, innerBorderSize, innerBorderR, innerBorderG, innerBorderB, innerBorderA, motionVectorX, motionVectorY, motionVectorDX, motionVectorDY, motionVectorLength, motionVectorR, motionVectorG, motionVectorB, motionVectorA, customShapes, customShapeCount, customWaveVertices, customWaveVertexCount, customWaveDraws, customWaveDrawCount, textureWarpVertices, textureWarpVertexCount, textureWarpGridX, textureWarpGridY);
+        m_d3d12Resources->DrawWaveform(left, right, spectrumLeft, spectrumRight, sampleCount, bass, mids, treble, waveR, waveG, waveB, waveA, waveScale, waveX, waveY, decay, zoom, rot, motionCenterX, motionCenterY, motionDX, motionDY, motionStretchX, motionStretchY, motionWarp, textureWrap, suppressVisualFeedback, echoAlpha, echoZoom, echoOrientation, waveUseDots, waveThick, waveAdditive, waveBrighten, waveMode, waveParam, waveSmoothing, waveAlphaVolumeScale, darkenCenter, postGamma, postInvert, postBrighten, postDarken, postSolarize, postShaderAmount, postHueShaderColors, postBlurAmount, postBlurEdgeDarken, outerBorderSize, outerBorderR, outerBorderG, outerBorderB, outerBorderA, innerBorderSize, innerBorderR, innerBorderG, innerBorderB, innerBorderA, motionVectorX, motionVectorY, motionVectorDX, motionVectorDY, motionVectorLength, motionVectorR, motionVectorG, motionVectorB, motionVectorA, customShapes, customShapeCount, customWaveVertices, customWaveVertexCount, customWaveDraws, customWaveDrawCount, textureWarpVertices, textureWarpVertexCount, textureWarpGridX, textureWarpGridY, compositeVertices, compositeVertexCount);
     }
 }
 

@@ -176,6 +176,9 @@ static constexpr GUID guid_cfg_bEnableMouseClickPlayPause = {
 static constexpr GUID guid_cfg_bSeparateClickPromptFont = {
     0x2284aa89, 0x905e, 0x43bb, {0x95, 0x0d, 0xc0, 0x77, 0xcd, 0x78, 0x8c, 0x85}
 }; // {2284AA89-905E-43BB-950D-C077CD788C85}
+static constexpr GUID guid_cfg_bPopoutBorderless = {
+    0xf75c0e40, 0xf027, 0x43b7, {0xb2, 0xbd, 0x6f, 0x1c, 0x2c, 0x04, 0x77, 0x3e}
+}; // {F75C0E40-F027-43B7-B2BD-6F1C2C04773E}
 
 // Preferences derived from other settings or hidden.
 static constexpr GUID guid_cfg_bTexSizeWasAutoPow2 = {
@@ -262,11 +265,14 @@ static constexpr bool default_bShowAlbum = false;
 static constexpr bool default_bEnableMouseWheelVolume = true;
 static constexpr bool default_bEnableMouseClickPlayPause = true;
 static constexpr bool default_bSeparateClickPromptFont = false;
+static constexpr bool default_bPopoutBorderless = false;
 static constexpr bool default_bEnableHDR = false;
 static constexpr int default_nBackBufferFormat = DXGI_FORMAT_B8G8R8A8_UNORM;
 static constexpr int default_nDepthBufferFormat = DXGI_FORMAT_D24_UNORM_S8_UINT;
 static constexpr int default_nBackBufferCount = 2;
 static constexpr int default_nMinFeatureLevel = D3D_FEATURE_LEVEL_9_1;
+static constexpr UINT supported_max_fps_values[] = {30u, 60u, 75u, 120u, 144u, 240u};
+static constexpr size_t supported_max_fps_count = sizeof(supported_max_fps_values) / sizeof(supported_max_fps_values[0]);
 static constexpr UINT default_max_fps_fs = 30;
 static constexpr bool default_allow_page_tearing_fs = false;
 static constexpr const char* default_szTitleFormat = "%title%";
@@ -317,6 +323,9 @@ class milk2_preferences_page : public preferences_page_instance, public CDialogI
         MSG_WM_INITDIALOG(OnInitDialog)
         MSG_WM_NOTIFY(OnNotify)
         MSG_WM_HSCROLL(OnHScroll)
+        MSG_WM_VSCROLL(OnVScroll)
+        MSG_WM_MOUSEWHEEL(OnMouseWheel)
+        MSG_WM_SIZE(OnSize)
         MSG_WM_CLOSE(OnClose)
         MSG_WM_DESTROY(OnDestroy)
         COMMAND_HANDLER_EX(IDC_CB_SCROLLON3, BN_CLICKED, OnButtonClick)
@@ -325,6 +334,10 @@ class milk2_preferences_page : public preferences_page_instance, public CDialogI
         COMMAND_HANDLER_EX(IDC_CB_NORATING2, BN_CLICKED, OnButtonClick)
         COMMAND_HANDLER_EX(IDC_CB_PRESS_F1_MSG, BN_CLICKED, OnButtonClick)
         COMMAND_HANDLER_EX(IDC_CB_NOCOMPSHADER, BN_CLICKED, OnButtonClick)
+        COMMAND_HANDLER_EX(IDC_CB_MOUSE_WHEEL_VOLUME, BN_CLICKED, OnButtonClick)
+        COMMAND_HANDLER_EX(IDC_CB_MOUSE_CLICK_PLAYPAUSE, BN_CLICKED, OnButtonClick)
+        COMMAND_HANDLER_EX(IDC_CB_POPOUT_BORDERLESS, BN_CLICKED, OnButtonClick)
+        COMMAND_HANDLER_EX(IDC_CB_SEPARATE_CLICK_PROMPT_FONT, BN_CLICKED, OnButtonClick)
         COMMAND_HANDLER_EX(IDC_W_MAXFPS2, CBN_SELCHANGE, OnComboChange)
         COMMAND_HANDLER_EX(IDC_FS_MAXFPS2, CBN_SELCHANGE, OnComboChange)
         COMMAND_HANDLER_EX(IDC_CB_WPT, BN_CLICKED, OnButtonClick)
@@ -353,6 +366,10 @@ class milk2_preferences_page : public preferences_page_instance, public CDialogI
         COMMAND_HANDLER_EX(ID_SPRITE, BN_CLICKED, OnButtonPushed)
         COMMAND_HANDLER_EX(ID_MSG, BN_CLICKED, OnButtonPushed)
         COMMAND_HANDLER_EX(ID_FONTS, BN_CLICKED, OnButtonPushed)
+        COMMAND_HANDLER_EX(ID_BLACKLIST, BN_CLICKED, OnButtonPushed)
+        COMMAND_HANDLER_EX(IDC_FORMAT_INFO, BN_CLICKED, OnButtonPushed)
+        COMMAND_HANDLER_EX(IDC_OPEN_MILKDROP_FOLDER, BN_CLICKED, OnButtonPushed)
+        COMMAND_HANDLER_EX(IDC_OPEN_TEXTURES_FOLDER, BN_CLICKED, OnButtonPushed)
     END_MSG_MAP()
     // clang-format on
 
@@ -369,6 +386,9 @@ class milk2_preferences_page : public preferences_page_instance, public CDialogI
     void OnButtonClick(UINT uNotifyCode, int nID, CWindow wndCtl);
     void OnComboChange(UINT uNotifyCode, int nID, CWindow wndCtl);
     void OnHScroll(UINT nSBCode, UINT nPos, CScrollBar pScrollBar);
+    void OnVScroll(UINT nSBCode, UINT nPos, CScrollBar pScrollBar);
+    BOOL OnMouseWheel(UINT nFlags, short zDelta, CPoint pt);
+    void OnSize(UINT nType, CSize size);
     void AutoHideGamma16();
     bool HasChanged() const;
     void OnChanged();
@@ -383,13 +403,24 @@ class milk2_preferences_page : public preferences_page_instance, public CDialogI
     void UpdateMaxFps(int screenmode) const;
     void SaveMaxFps(int screenmode) const;
     void OpenToEdit(LPWSTR szDefault, LPCWSTR szFilename);
+    void OpenDirectory(LPCWSTR directory, LPCWSTR title);
     void InitFontI(td_fontinfo* fi, DWORD ctrl1, DWORD ctrl2, DWORD bold_id, DWORD ital_id, DWORD aa_id, HWND hdlg, DWORD ctrl4, wchar_t* szFontName);
     void SaveFontI(td_fontinfo* fi, DWORD ctrl1, DWORD ctrl2, DWORD bold_id, DWORD ital_id, DWORD aa_id, HWND hdlg);
+    void CapturePreferencesControlLayout();
+    void RepositionPreferencesControls();
+    int GetPreferencesContentHeight() const;
+    int GetPreferencesScrollMax() const;
+    void PositionPreferencesScrollBar(bool visible);
+    void UpdatePreferencesScrollBar();
+    void ScrollPreferencesTo(int scrollPos);
 
     const preferences_page_callback::ptr m_callback;
     bool m_resetpage;
+    int m_preferences_scroll_pos = 0;
 
     CToolTipCtrl m_tooltips;
+    std::vector<std::wstring> m_tooltip_texts;
+    std::vector<std::pair<HWND, RECT>> m_preference_control_layout;
 
     fb2k::CDarkModeHooks m_dark;
 };
@@ -432,6 +463,98 @@ class FontDlg : public CDialogImpl<FontDlg>
 
     BEGIN_MSG_MAP(FontDlg)
     END_MSG_MAP()
+};
+
+class FormatInfoDlg : public CDialogImpl<FormatInfoDlg>
+{
+  public:
+    explicit FormatInfoDlg(HWND preferencesWnd) : m_preferences_wnd(preferencesWnd) {}
+
+    enum format_info_dialog_id
+    {
+        IDD = IDD_FORMAT_INFO
+    };
+
+    BEGIN_MSG_MAP(FormatInfoDlg)
+        MSG_WM_INITDIALOG(OnInitDialog)
+        MSG_WM_DESTROY(OnDestroy)
+        COMMAND_ID_HANDLER_EX(IDC_FORMAT_INFO_LOAD_EXAMPLE_1, OnBuildCmd)
+        COMMAND_ID_HANDLER_EX(IDC_FORMAT_INFO_LOAD_EXAMPLE_2, OnBuildCmd)
+        COMMAND_ID_HANDLER_EX(IDC_FORMAT_INFO_ADD_FIELD, OnBuildCmd)
+        COMMAND_ID_HANDLER_EX(IDC_FORMAT_INFO_ADD_CRLF, OnBuildCmd)
+        COMMAND_ID_HANDLER_EX(IDC_FORMAT_INFO_CLEAR_BUILDER, OnBuildCmd)
+        COMMAND_ID_HANDLER_EX(IDC_FORMAT_INFO_COPY_BUILDER, OnBuildCmd)
+        COMMAND_ID_HANDLER_EX(IDC_FORMAT_INFO_USE_TITLE, OnBuildCmd)
+        COMMAND_ID_HANDLER_EX(IDC_FORMAT_INFO_USE_ARTWORK, OnBuildCmd)
+        COMMAND_ID_HANDLER_EX(IDOK, OnCloseCmd)
+        COMMAND_ID_HANDLER_EX(IDCANCEL, OnCloseCmd)
+    END_MSG_MAP()
+
+  private:
+    BOOL OnInitDialog(CWindow, LPARAM);
+    void OnDestroy();
+    void OnBuildCmd(UINT, int nID, CWindow);
+    void OnCloseCmd(UINT, int nID, CWindow);
+
+    fb2k::CDarkModeHooks m_dark;
+    HWND m_preferences_wnd = nullptr;
+    HFONT m_header_font = nullptr;
+    HFONT m_monospace_font = nullptr;
+};
+
+class PresetBlacklistDlg : public CDialogImpl<PresetBlacklistDlg>
+{
+  public:
+    enum preset_blacklist_dialog_id
+    {
+        IDD = IDD_PRESET_BLACKLIST
+    };
+
+    bool HasChanges() const noexcept { return m_changed; }
+
+    BEGIN_MSG_MAP(PresetBlacklistDlg)
+        MSG_WM_INITDIALOG(OnInitDialog)
+        MSG_WM_DESTROY(OnDestroy)
+        MESSAGE_HANDLER_EX(WM_CTLCOLOREDIT, OnCtlColorEdit)
+        COMMAND_ID_HANDLER_EX(IDOK, OnCloseCmd)
+        COMMAND_ID_HANDLER_EX(IDCANCEL, OnCloseCmd)
+        COMMAND_HANDLER_EX(IDC_BLACKLIST_ADD, BN_CLICKED, OnAdd)
+        COMMAND_HANDLER_EX(IDC_BLACKLIST_REMOVE, BN_CLICKED, OnRemove)
+        COMMAND_HANDLER_EX(IDC_BLACKLIST_OPEN, BN_CLICKED, OnOpenLocation)
+        COMMAND_HANDLER_EX(IDC_BLACKLIST_PRESET_DIR, BN_CLICKED, OnOpenPresetDirectory)
+        COMMAND_HANDLER_EX(IDC_BLACKLIST_IMPORT, BN_CLICKED, OnImport)
+        COMMAND_HANDLER_EX(IDC_BLACKLIST_EXPORT, BN_CLICKED, OnExport)
+        COMMAND_HANDLER_EX(IDC_BLACKLIST_ENTRY, EN_CHANGE, OnEntryChanged)
+        COMMAND_HANDLER_EX(IDC_BLACKLIST_ENTRY, EN_SETFOCUS, OnEntrySetFocus)
+        COMMAND_HANDLER_EX(IDC_BLACKLIST_ENTRY, EN_KILLFOCUS, OnEntryKillFocus)
+        COMMAND_HANDLER_EX(IDC_BLACKLIST_LIST, LBN_SELCHANGE, OnListSelectionChanged)
+        COMMAND_HANDLER_EX(IDC_BLACKLIST_LIST, LBN_DBLCLK, OnOpenLocation)
+    END_MSG_MAP()
+
+  private:
+    BOOL OnInitDialog(CWindow, LPARAM);
+    void OnDestroy();
+    LRESULT OnCtlColorEdit(UINT, WPARAM, LPARAM);
+    void OnCloseCmd(UINT, int nID, CWindow);
+    void OnAdd(UINT, int, CWindow);
+    void OnRemove(UINT, int, CWindow);
+    void OnOpenLocation(UINT, int, CWindow);
+    void OnOpenPresetDirectory(UINT, int, CWindow);
+    void OnImport(UINT, int, CWindow);
+    void OnExport(UINT, int, CWindow);
+    void OnEntryChanged(UINT, int, CWindow);
+    void OnEntrySetFocus(UINT, int, CWindow);
+    void OnEntryKillFocus(UINT, int, CWindow);
+    void OnListSelectionChanged(UINT, int, CWindow);
+    void ApplyEntryPlaceholder();
+    void ClearEntryPlaceholder();
+    void RefreshList();
+    void UpdateButtons();
+
+    bool m_changed = false;
+    bool m_entry_placeholder_active = false;
+    HFONT m_entry_placeholder_font = nullptr;
+    fb2k::CDarkModeHooks m_dark;
 };
 
 class milk2_config

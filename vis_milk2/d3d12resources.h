@@ -9,6 +9,7 @@
 #include <dxgi1_6.h>
 #include <wrl/client.h>
 #include <cstddef>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -65,6 +66,10 @@ struct TextureWarpVertex
     float y = 0.0f;
     float u = 0.0f;
     float v = 0.0f;
+    float uOrig = 0.0f;
+    float vOrig = 0.0f;
+    float rad = 0.0f;
+    float ang = 0.0f;
     float r = 1.0f;
     float g = 1.0f;
     float b = 1.0f;
@@ -90,6 +95,7 @@ class D3D12Resources
     bool SetTextureFiles(const wchar_t* const* textureFiles, size_t textureFileCount);
     void ClearTextureFiles();
     bool SetPresetTextureFiles(const wchar_t* const* textureFiles, size_t textureFileCount);
+    bool SetStandaloneTextureFiles(const wchar_t* const* textureFiles, size_t textureFileCount);
     void ClearPresetTextureOverride();
     bool SetPresetWarpShader(const void* bytecode, size_t bytecodeSize);
     void ClearPresetWarpShader();
@@ -98,10 +104,13 @@ class D3D12Resources
     void ResetVisualHistory();
     bool CaptureCurrentFrame(std::vector<uint8_t>* pixels, UINT* width, UINT* height);
     bool SetResumeFeedbackFromFrame(UINT width, UINT height, const std::vector<uint8_t>& pixels);
-    void SetPresetShaderRuntimeConstants(float time,
+    void SetPresetShaderRuntimeConstants(float presetTime,
+                                         float globalTime,
                                          float fps,
                                          float frame,
                                          float progress,
+                                         float canvasWidth,
+                                         float canvasHeight,
                                          float bass,
                                          float mids,
                                          float treble,
@@ -152,6 +161,8 @@ class D3D12Resources
                       float motionStretchX = 1.0f,
                       float motionStretchY = 1.0f,
                       float motionWarp = 0.0f,
+                      bool textureWrap = true,
+                      bool suppressVisualFeedback = false,
                       float echoAlpha = 0.0f,
                       float echoZoom = 2.0f,
                       int echoOrientation = 0,
@@ -201,7 +212,9 @@ class D3D12Resources
                       const TextureWarpVertex* textureWarpVertices = nullptr,
                       size_t textureWarpVertexCount = 0,
                       int textureWarpGridX = 0,
-                      int textureWarpGridY = 0);
+                      int textureWarpGridY = 0,
+                      const TextureWarpVertex* compositeVertices = nullptr,
+                      size_t compositeVertexCount = 0);
     void Present();
 
     RECT GetOutputSize() const noexcept { return m_outputSize; }
@@ -272,7 +285,10 @@ class D3D12Resources
                                      UINT sourceRowPitch,
                                      UINT sourceRowCount,
                                      UINT sourceDepthCount);
-    bool SetTextureFilesInternal(const wchar_t* const* textureFiles, size_t textureFileCount, bool presetTextureOverride);
+    bool SetTextureFilesInternal(const wchar_t* const* textureFiles,
+                                 size_t textureFileCount,
+                                 bool presetTextureOverride,
+                                 bool standaloneTextureOverride);
     void ClearTextureSlots();
     void RefreshTextureFileList();
     bool IsPostProcessEnabled() const;
@@ -304,7 +320,8 @@ class D3D12Resources
                          float motionStretchY,
                          float motionWarp,
                          float baseLayerAlpha = 1.0f,
-                         float extraLayerAlphaScale = 1.0f);
+                         float extraLayerAlphaScale = 1.0f,
+                         bool textureWrap = true);
     void DrawTextureQuadFromSrv(D3D12_GPU_DESCRIPTOR_HANDLE srvHandle,
                                 ID3D12DescriptorHeap* descriptorHeap,
                                 float bass,
@@ -326,7 +343,8 @@ class D3D12Resources
                                 float motionStretchY,
                                 float motionWarp,
                                 bool applyDecayTint,
-                                bool additive = false);
+                                bool additive = false,
+                                bool textureWrap = true);
     void DrawTexturedCustomShapesFromSrv(D3D12_GPU_DESCRIPTOR_HANDLE srvHandle,
                                          ID3D12DescriptorHeap* descriptorHeap,
                                          const CustomShapeDrawCommand* customShapes,
@@ -343,7 +361,8 @@ class D3D12Resources
                             bool applyDecayTint,
                             bool additive = false,
                             bool usePresetWarpShader = false,
-                            ID3D12Resource* shaderSourceTexture = nullptr);
+                            ID3D12Resource* shaderSourceTexture = nullptr,
+                            bool textureWrap = true);
     void DrawPostProcessFromSrv(D3D12_GPU_DESCRIPTOR_HANDLE srvHandle,
                                 ID3D12DescriptorHeap* descriptorHeap,
                                 float gamma,
@@ -357,14 +376,21 @@ class D3D12Resources
                             float blurEdgeDarken,
                             float echoAlpha,
                             float echoZoom,
-                            int echoOrientation);
+                            int echoOrientation,
+                            const TextureWarpVertex* compositeVertices,
+                            size_t compositeVertexCount);
 
     static constexpr UINT c_maxBackBufferCount = 3;
+    static constexpr UINT c_feedbackTextureCount = 2;
+    static constexpr UINT c_feedbackScratchSrvIndex = c_feedbackTextureCount;
+    static constexpr UINT c_resumeFeedbackSrvIndex = c_feedbackScratchSrvIndex + 1;
+    static constexpr UINT c_feedbackSrvCount = c_resumeFeedbackSrvIndex + 1;
     static constexpr UINT c_maxTextureLayers = 16;
     static constexpr UINT c_noiseTextureCount = 4;
     static constexpr UINT c_noiseVolumeTextureCount = 2;
     static constexpr UINT c_visibleBlurTextureCount = 3;
     static constexpr UINT c_blurRenderTextureCount = 6;
+    static constexpr UINT c_maxLegacyBlurSourceDimension = 1024;
     static constexpr UINT c_sourceSrvIndex = 0;
     static constexpr UINT c_textureLayerSrvStart = c_sourceSrvIndex + 1;
     static constexpr UINT c_noiseTextureSrvStart = c_textureLayerSrvStart + c_maxTextureLayers;
@@ -376,8 +402,10 @@ class D3D12Resources
     static constexpr UINT c_samplerPointWrap = c_samplerLinearClamp + 1;
     static constexpr UINT c_samplerPointClamp = c_samplerPointWrap + 1;
     static constexpr UINT c_shaderStaticSamplerCount = c_samplerPointClamp + 1;
-    static constexpr UINT c_maxWaveformVertices = 65536;
-    static constexpr UINT c_maxTextureVertices = 32768;
+    static constexpr UINT c_maxWaveformVertices = 262144;
+    static constexpr UINT c_maxTextOverlayVertices = 262144;
+    static constexpr UINT c_maxTextureVertices = 131072;
+    static constexpr size_t c_maxCustomShapeCommands = 8192;
 
     struct WaveformVertex
     {
@@ -388,7 +416,8 @@ class D3D12Resources
     struct TextureVertex
     {
         float position[2];
-        float uv[2];
+        float uv[4];
+        float radAng[2];
         float color[4];
     };
 
@@ -397,6 +426,8 @@ class D3D12Resources
         Microsoft::WRL::ComPtr<ID3D12Resource> texture;
         Microsoft::WRL::ComPtr<ID3D12Resource> uploadBuffer;
         std::wstring file;
+        UINT width = 0;
+        UINT height = 0;
     };
 
     HWND m_window = nullptr;
@@ -406,6 +437,7 @@ class D3D12Resources
     unsigned int m_options = 0;
     UINT m_frameIndex = 0;
     UINT m_rtvDescriptorSize = 0;
+    std::recursive_mutex m_commandMutex;
 
     Microsoft::WRL::ComPtr<IDXGIFactory4> m_dxgiFactory;
     Microsoft::WRL::ComPtr<ID3D12Device> m_d3dDevice;
@@ -418,6 +450,8 @@ class D3D12Resources
     Microsoft::WRL::ComPtr<ID3D12RootSignature> m_waveformRootSignature;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_waveformPipelineState;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_waveformAdditivePipelineState;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_pointPipelineState;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_pointAdditivePipelineState;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_solidPipelineState;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_solidAdditivePipelineState;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_waveformVertexBuffers[c_maxBackBufferCount];
@@ -425,11 +459,19 @@ class D3D12Resources
     WaveformVertex* m_mappedWaveformVertexBuffers[c_maxBackBufferCount]{};
     D3D12_VERTEX_BUFFER_VIEW m_waveformVertexBufferView{};
     WaveformVertex* m_mappedWaveformVertices = nullptr;
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_textOverlayVertexBuffers[c_maxBackBufferCount];
+    D3D12_VERTEX_BUFFER_VIEW m_textOverlayVertexBufferViews[c_maxBackBufferCount]{};
+    WaveformVertex* m_mappedTextOverlayVertexBuffers[c_maxBackBufferCount]{};
+    D3D12_VERTEX_BUFFER_VIEW m_textOverlayVertexBufferView{};
+    WaveformVertex* m_mappedTextOverlayVertices = nullptr;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_srvHeap;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> m_textureRootSignature;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_texturePipelineState;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_textureClampPipelineState;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_textureAlphaPipelineState;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_textureAlphaClampPipelineState;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_textureAdditivePipelineState;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_textureAdditiveClampPipelineState;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_textureVertexBuffers[c_maxBackBufferCount];
     TextureSlot m_textureSlots[c_maxTextureLayers];
     TextureSlot m_noiseTextureSlots[c_noiseTextureCount];
@@ -464,10 +506,13 @@ class D3D12Resources
     std::vector<uint8_t> m_postProcessVertexShaderBytecode;
     std::vector<uint8_t> m_presetWarpShaderBytecode;
     std::vector<uint8_t> m_presetCompositeShaderBytecode;
-    float m_presetShaderTime = 0.0f;
+    float m_presetShaderPresetTime = 0.0f;
+    float m_presetShaderGlobalTime = 0.0f;
     float m_presetShaderFps = 0.0f;
     float m_presetShaderFrame = 0.0f;
     float m_presetShaderProgress = 0.0f;
+    float m_presetShaderCanvasWidth = 1.0f;
+    float m_presetShaderCanvasHeight = 1.0f;
     float m_presetShaderBass = 0.0f;
     float m_presetShaderMids = 0.0f;
     float m_presetShaderTreble = 0.0f;
@@ -481,18 +526,19 @@ class D3D12Resources
     float m_presetShaderBlurMax[3]{1.0f, 1.0f, 1.0f};
     float m_presetShaderRotMatrices[24 * 12]{};
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_feedbackSrvHeap;
-    Microsoft::WRL::ComPtr<ID3D12Resource> m_feedbackTextures[2];
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_feedbackTextures[c_feedbackTextureCount];
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_feedbackScratchTexture;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_resumeFeedbackTexture;
     UINT m_feedbackSrvDescriptorSize = 0;
     UINT m_feedbackIndex = 0;
     bool m_feedbackReady[2]{};
     bool m_resumeFeedbackReady = false;
     std::wstring m_textureDirectory;
-    std::wstring m_currentTextureFile;
     std::vector<std::wstring> m_textureFiles;
     size_t m_textureCycleIndex = 0;
     ULONGLONG m_lastTextureCycleTick = 0;
     bool m_presetTextureOverride = false;
+    bool m_standaloneTextureOverride = false;
     std::wstring m_overlayTopLeft;
     std::wstring m_overlayTopRight;
     std::wstring m_overlayBottomLeft;

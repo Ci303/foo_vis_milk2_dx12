@@ -19,6 +19,26 @@ namespace
 {
 constexpr UINT c_postProcessConstantBufferSize = 4096;
 
+void StoreTextureRadAng(float radAng[2], float u, float v) noexcept
+{
+    const float du = u - 0.5f;
+    const float dv = v - 0.5f;
+    radAng[0] = sqrtf(du * du + dv * dv);
+    radAng[1] = atan2f(dv, du);
+}
+
+void StoreTextureRadAng(float radAng[2], float rad, float ang, float u, float v) noexcept
+{
+    if (std::isfinite(rad) && std::isfinite(ang))
+    {
+        radAng[0] = rad;
+        radAng[1] = ang;
+        return;
+    }
+
+    StoreTextureRadAng(radAng, u, v);
+}
+
 constexpr uint32_t MakeFourCC(char a, char b, char c, char d) noexcept
 {
     return static_cast<uint32_t>(static_cast<uint8_t>(a)) |
@@ -80,29 +100,62 @@ uint32_t MakeNoiseColor(uint32_t& state, UINT zoomFactor) noexcept
     return color;
 }
 
-void WriteD3D12LogLine(const wchar_t* message)
+bool IsD3D12TruthyLogValue(const wchar_t* value) noexcept
 {
+    return value && value[0] != L'\0' && wcscmp(value, L"0") != 0 && _wcsicmp(value, L"false") != 0;
+}
+
+bool ResolveD3D12LogPath(wchar_t* logPath, size_t logPathCount) noexcept
+{
+    if (!logPath || logPathCount == 0)
+        return false;
+
+    logPath[0] = L'\0';
+
     wchar_t logValue[MAX_PATH]{};
     const DWORD valueLength = GetEnvironmentVariableW(L"FOO_VIS_MILK2_DX12_LOG", logValue, static_cast<DWORD>(std::size(logValue)));
-    if (valueLength == 0 || wcscmp(logValue, L"0") == 0)
+    if (valueLength >= std::size(logValue))
+        return false;
+    if (valueLength > 0 && !IsD3D12TruthyLogValue(logValue))
+        return false;
+
+    const bool useDefaultPath =
+        valueLength == 0 ||
+        wcscmp(logValue, L"1") == 0 ||
+        _wcsicmp(logValue, L"true") == 0;
+    if (!useDefaultPath)
     {
-        return;
+        wcscpy_s(logPath, logPathCount, logValue);
+        return true;
     }
 
+    wchar_t devValue[8]{};
+    const DWORD devValueLength = GetEnvironmentVariableW(L"FOO_VIS_MILK2_DX12_DEV", devValue, static_cast<DWORD>(std::size(devValue)));
+    if (valueLength == 0 && (devValueLength == 0 || !IsD3D12TruthyLogValue(devValue)))
+        return false;
+
+    wchar_t exePath[MAX_PATH]{};
+    const DWORD exeLength = GetModuleFileNameW(nullptr, exePath, static_cast<DWORD>(std::size(exePath)));
+    if (exeLength == 0 || exeLength >= std::size(exePath))
+        return false;
+
+    wchar_t* lastSlash = wcsrchr(exePath, L'\\');
+    if (!lastSlash)
+        return false;
+    *(lastSlash + 1) = L'\0';
+
+    wcscpy_s(logPath, logPathCount, exePath);
+    wcscat_s(logPath, logPathCount, L"profile\\");
+    CreateDirectoryW(logPath, nullptr);
+    wcscat_s(logPath, logPathCount, L"foo_vis_milk2_dx12.log");
+    return true;
+}
+
+void WriteD3D12LogLine(const wchar_t* message)
+{
     wchar_t logPath[MAX_PATH]{};
-    if (wcscmp(logValue, L"1") != 0 && wcscmp(logValue, L"true") != 0 && wcscmp(logValue, L"TRUE") != 0)
-    {
-        wcscpy_s(logPath, logValue);
-    }
-    else
-    {
-        const DWORD tempLength = GetTempPathW(static_cast<DWORD>(std::size(logPath)), logPath);
-        if (tempLength == 0 || tempLength >= std::size(logPath))
-        {
-            return;
-        }
-        wcscat_s(logPath, L"foo_vis_milk2_dx12.log");
-    }
+    if (!ResolveD3D12LogPath(logPath, std::size(logPath)))
+        return;
 
     HANDLE file = CreateFileW(logPath,
                               FILE_APPEND_DATA,
@@ -396,6 +449,16 @@ D3D12Resources::~D3D12Resources()
 
     for (UINT i = 0; i < c_maxBackBufferCount; ++i)
     {
+        if (m_textOverlayVertexBuffers[i] && m_mappedTextOverlayVertexBuffers[i])
+        {
+            m_textOverlayVertexBuffers[i]->Unmap(0, nullptr);
+            m_mappedTextOverlayVertexBuffers[i] = nullptr;
+        }
+    }
+    m_mappedTextOverlayVertices = nullptr;
+
+    for (UINT i = 0; i < c_maxBackBufferCount; ++i)
+    {
         if (m_textureVertexBuffers[i] && m_mappedTextureVertexBuffers[i])
         {
             m_textureVertexBuffers[i]->Unmap(0, nullptr);
@@ -502,6 +565,7 @@ void D3D12Resources::CreateWindowSizeDependentResources()
     {
         feedbackTexture.Reset();
     }
+    m_feedbackScratchTexture.Reset();
     m_postProcessTexture.Reset();
     for (auto& blurTexture : m_blurTextures)
     {
@@ -559,6 +623,8 @@ void D3D12Resources::CreateWindowSizeDependentResources()
 
 bool D3D12Resources::WindowSizeChanged(int width, int height)
 {
+    std::lock_guard<std::recursive_mutex> commandLock(m_commandMutex);
+
     RECT newRc{};
     newRc.right = static_cast<long>(std::max(width, 1));
     newRc.bottom = static_cast<long>(std::max(height, 1));
@@ -579,6 +645,8 @@ bool D3D12Resources::WindowSizeChanged(int width, int height)
 
 bool D3D12Resources::WindowSwap(HWND window, int width, int height)
 {
+    std::lock_guard<std::recursive_mutex> commandLock(m_commandMutex);
+
     if (!WaitForGpu(1000))
         return false;
     CaptureBackBufferForResume();
@@ -595,6 +663,7 @@ bool D3D12Resources::WindowSwap(HWND window, int width, int height)
     {
         feedbackTexture.Reset();
     }
+    m_feedbackScratchTexture.Reset();
     m_postProcessTexture.Reset();
     for (auto& blurTexture : m_blurTextures)
     {
@@ -627,6 +696,7 @@ std::vector<std::wstring> D3D12Resources::GetActiveTextureFiles() const
 void D3D12Resources::SetTextureDirectory(const wchar_t* textureDirectory)
 {
     m_presetTextureOverride = false;
+    m_standaloneTextureOverride = false;
     m_textureDirectory = textureDirectory ? textureDirectory : L"";
     if (!m_textureDirectory.empty() && m_textureDirectory.back() != L'\\' && m_textureDirectory.back() != L'/')
     {
@@ -668,28 +738,35 @@ bool D3D12Resources::SetTextureFile(const wchar_t* textureFile)
 
 bool D3D12Resources::SetTextureFiles(const wchar_t* const* textureFiles, size_t textureFileCount)
 {
-    return SetTextureFilesInternal(textureFiles, textureFileCount, false);
+    return SetTextureFilesInternal(textureFiles, textureFileCount, false, false);
 }
 
 void D3D12Resources::ClearTextureFiles()
 {
     m_presetTextureOverride = false;
+    m_standaloneTextureOverride = false;
     ClearTextureSlots();
 }
 
 bool D3D12Resources::SetPresetTextureFiles(const wchar_t* const* textureFiles, size_t textureFileCount)
 {
-    return SetTextureFilesInternal(textureFiles, textureFileCount, true);
+    return SetTextureFilesInternal(textureFiles, textureFileCount, true, false);
+}
+
+bool D3D12Resources::SetStandaloneTextureFiles(const wchar_t* const* textureFiles, size_t textureFileCount)
+{
+    return SetTextureFilesInternal(textureFiles, textureFileCount, false, true);
 }
 
 void D3D12Resources::ClearPresetTextureOverride()
 {
-    if (!m_presetTextureOverride)
+    if (!m_presetTextureOverride && !m_standaloneTextureOverride)
     {
         return;
     }
 
     m_presetTextureOverride = false;
+    m_standaloneTextureOverride = false;
     if (!m_d3dDevice || !m_commandQueue)
     {
         return;
@@ -806,10 +883,13 @@ void D3D12Resources::ClearPresetCompositeShader()
     m_presetCompositeShaderBytecode.clear();
 }
 
-void D3D12Resources::SetPresetShaderRuntimeConstants(float time,
+void D3D12Resources::SetPresetShaderRuntimeConstants(float presetTime,
+                                                     float globalTime,
                                                      float fps,
                                                      float frame,
                                                      float progress,
+                                                     float canvasWidth,
+                                                     float canvasHeight,
                                                      float bass,
                                                      float mids,
                                                      float treble,
@@ -827,10 +907,13 @@ void D3D12Resources::SetPresetShaderRuntimeConstants(float time,
         return std::isfinite(value) ? value : fallback;
     };
 
-    m_presetShaderTime = clean(time, 0.0f);
+    m_presetShaderPresetTime = clean(presetTime, 0.0f);
+    m_presetShaderGlobalTime = clean(globalTime, m_presetShaderPresetTime);
     m_presetShaderFps = clean(fps, 0.0f);
     m_presetShaderFrame = clean(frame, 0.0f);
     m_presetShaderProgress = std::clamp(clean(progress, 0.0f), 0.0f, 1.0f);
+    m_presetShaderCanvasWidth = std::max(clean(canvasWidth, 1.0f), 1.0f);
+    m_presetShaderCanvasHeight = std::max(clean(canvasHeight, 1.0f), 1.0f);
     m_presetShaderBass = clean(bass, 0.0f);
     m_presetShaderMids = clean(mids, 0.0f);
     m_presetShaderTreble = clean(treble, 0.0f);
@@ -882,8 +965,13 @@ RECT D3D12Resources::GetPresentationSize() const noexcept
     return result;
 }
 
-bool D3D12Resources::SetTextureFilesInternal(const wchar_t* const* textureFiles, size_t textureFileCount, bool presetTextureOverride)
+bool D3D12Resources::SetTextureFilesInternal(const wchar_t* const* textureFiles,
+                                             size_t textureFileCount,
+                                             bool presetTextureOverride,
+                                             bool standaloneTextureOverride)
 {
+    std::lock_guard<std::recursive_mutex> commandLock(m_commandMutex);
+
     if (!m_d3dDevice || !m_commandQueue || !textureFiles || textureFileCount == 0)
     {
         return false;
@@ -922,10 +1010,8 @@ bool D3D12Resources::SetTextureFilesInternal(const wchar_t* const* textureFiles,
 
     if (loadedCount == 0)
     {
-        if (presetTextureOverride)
-        {
-            m_presetTextureOverride = false;
-        }
+        m_presetTextureOverride = false;
+        m_standaloneTextureOverride = false;
         ClearTextureSlots();
         return false;
     }
@@ -935,29 +1021,41 @@ bool D3D12Resources::SetTextureFilesInternal(const wchar_t* const* textureFiles,
         m_textureSlots[slot].texture.Reset();
         m_textureSlots[slot].uploadBuffer.Reset();
         m_textureSlots[slot].file.clear();
+        m_textureSlots[slot].width = 0;
+        m_textureSlots[slot].height = 0;
     }
     m_activeTextureLayerCount = loadedCount;
-    m_currentTextureFile = m_textureSlots[0].file;
     m_presetTextureOverride = presetTextureOverride;
+    m_standaloneTextureOverride = standaloneTextureOverride && !presetTextureOverride;
     RefreshPostProcessTextureSrvs();
     return true;
 }
 
 void D3D12Resources::ClearTextureSlots()
 {
+    std::lock_guard<std::recursive_mutex> commandLock(m_commandMutex);
+
     for (UINT slot = 0; slot < c_maxTextureLayers; ++slot)
     {
         m_textureSlots[slot].texture.Reset();
         m_textureSlots[slot].uploadBuffer.Reset();
         m_textureSlots[slot].file.clear();
+        m_textureSlots[slot].width = 0;
+        m_textureSlots[slot].height = 0;
     }
     m_activeTextureLayerCount = 0;
-    m_currentTextureFile.clear();
     RefreshPostProcessTextureSrvs();
 }
 
 void D3D12Resources::Clear()
 {
+    std::lock_guard<std::recursive_mutex> commandLock(m_commandMutex);
+
+    if (!m_commandList || !m_commandQueue || !m_renderTargets[m_frameIndex] || !m_commandAllocators[m_frameIndex])
+    {
+        return;
+    }
+
     ThrowIfFailed(m_commandAllocators[m_frameIndex]->Reset());
     ThrowIfFailed(m_commandList->Reset(m_commandAllocators[m_frameIndex].Get(), nullptr));
 
@@ -1007,6 +1105,8 @@ void D3D12Resources::DrawWaveform(const float* left,
                                   float motionStretchX,
                                   float motionStretchY,
                                   float motionWarp,
+                                  bool textureWrap,
+                                  bool suppressVisualFeedback,
                                   float echoAlpha,
                                   float echoZoom,
                                   int echoOrientation,
@@ -1056,15 +1156,21 @@ void D3D12Resources::DrawWaveform(const float* left,
                                   const TextureWarpVertex* textureWarpVertices,
                                   size_t textureWarpVertexCount,
                                   int textureWarpGridX,
-                                  int textureWarpGridY)
+                                  int textureWarpGridY,
+                                  const TextureWarpVertex* compositeVertices,
+                                  size_t compositeVertexCount)
 {
+    std::lock_guard<std::recursive_mutex> commandLock(m_commandMutex);
+
     (void)spectrumRight;
     m_mappedWaveformVertices = m_mappedWaveformVertexBuffers[m_frameIndex];
     m_waveformVertexBufferView = m_waveformVertexBufferViews[m_frameIndex];
+    m_mappedTextOverlayVertices = m_mappedTextOverlayVertexBuffers[m_frameIndex];
+    m_textOverlayVertexBufferView = m_textOverlayVertexBufferViews[m_frameIndex];
     m_mappedTextureVertices = m_mappedTextureVertexBuffers[m_frameIndex];
     m_textureVertexBufferView = m_textureVertexBufferViews[m_frameIndex];
 
-    if (!left || !right || !m_mappedWaveformVertices || !m_waveformPipelineState || !m_waveformAdditivePipelineState || !m_solidPipelineState || !m_solidAdditivePipelineState || !m_waveformRootSignature)
+    if (!left || !right || !m_commandList || !m_commandQueue || !m_commandAllocators[m_frameIndex] || !m_renderTargets[m_frameIndex] || !m_mappedWaveformVertices || !m_waveformPipelineState || !m_waveformAdditivePipelineState || !m_pointPipelineState || !m_pointAdditivePipelineState || !m_solidPipelineState || !m_solidAdditivePipelineState || !m_waveformRootSignature)
     {
         Clear();
         return;
@@ -1117,9 +1223,16 @@ void D3D12Resources::DrawWaveform(const float* left,
     const UINT previousFeedbackIndex = 1u - m_feedbackIndex;
     const UINT outputPixelWidth = static_cast<UINT>(std::max<long>(m_outputSize.right - m_outputSize.left, 1));
     const UINT outputPixelHeight = static_cast<UINT>(std::max<long>(m_outputSize.bottom - m_outputSize.top, 1));
-    const bool resumeFeedbackUsable = m_resumeFeedbackReady && IsResumeFeedbackCompatible(outputPixelWidth, outputPixelHeight);
-    const bool feedbackSourceReady = m_feedbackReady[previousFeedbackIndex] || resumeFeedbackUsable;
-    const bool canDrawTexturedShapes = m_feedbackReady[previousFeedbackIndex] &&
+    const float waveAspectX = outputPixelHeight > outputPixelWidth ?
+        static_cast<float>(outputPixelWidth) / static_cast<float>(outputPixelHeight) :
+        1.0f;
+    const float waveAspectY = outputPixelWidth > outputPixelHeight ?
+        static_cast<float>(outputPixelHeight) / static_cast<float>(outputPixelWidth) :
+        1.0f;
+    const bool resumeFeedbackUsable = !suppressVisualFeedback && m_resumeFeedbackReady && IsResumeFeedbackCompatible(outputPixelWidth, outputPixelHeight);
+    const bool feedbackSourceReady = !suppressVisualFeedback && (m_feedbackReady[previousFeedbackIndex] || resumeFeedbackUsable);
+    const bool canDrawTexturedShapes = !suppressVisualFeedback &&
+                                       m_feedbackReady[previousFeedbackIndex] &&
                                        m_feedbackSrvHeap &&
                                        m_textureAlphaPipelineState &&
                                        m_textureAdditivePipelineState &&
@@ -1131,8 +1244,10 @@ void D3D12Resources::DrawWaveform(const float* left,
                                            m_postProcessRootSignature &&
                                            m_mappedTextureVertices &&
                                            IsPostProcessEnabled();
+    const bool presetCompositeActive = m_presetCompositePipelineState != nullptr;
     const bool postProcessActive = postProcessResourcesReady &&
-                                   (fabsf(postGamma - 1.0f) > 0.001f ||
+                                   (presetCompositeActive ||
+                                    fabsf(postGamma - 1.0f) > 0.001f ||
                                     postInvert ||
                                     postBrighten ||
                                     postDarken ||
@@ -1147,6 +1262,7 @@ void D3D12Resources::DrawWaveform(const float* left,
                                     m_blurPassSrvHeap &&
                                     (m_presetWarpPipelineState || m_presetCompositePipelineState || postProcessActive);
     const bool hasTextureWarpMesh = textureWarpVertices && textureWarpVertexCount >= 3;
+    const bool legacyFixedPipeline = !m_presetWarpPipelineState.Get() && !m_presetCompositePipelineState.Get() && hasTextureWarpMesh;
     const bool hasTextureWarpGrid = textureWarpVertices &&
                                     textureWarpGridX > 0 &&
                                     textureWarpGridY > 0 &&
@@ -1231,6 +1347,8 @@ void D3D12Resources::DrawWaveform(const float* left,
     auto writePoint = [&](UINT segment, UINT index, float localX, float localY, float r, float g, float b) {
         const UINT groupCount = activeCount * visibleSegments;
         const UINT baseIndex = segment * activeCount + index;
+        localX *= waveAspectY;
+        localY *= waveAspectX;
         localX /= zoom;
         localY /= zoom;
         const float x = centerX + localX * c - localY * s;
@@ -1285,16 +1403,18 @@ void D3D12Resources::DrawWaveform(const float* left,
 
     if (waveMode == 0)
     {
-        activeCount = std::min<UINT>(sourceCount / 2, 240u);
-        const UINT sampleOffset = sourceCount > activeCount * 2 ? (sourceCount - activeCount * 2) / 2 : 0;
+        const UINT circularSampleCount = std::max<UINT>(2u, std::min<UINT>(sourceCount / 2, 288u));
+        activeCount = circularSampleCount + 1u;
+        const UINT sampleOffset = sourceCount > circularSampleCount * 2 ? (sourceCount - circularSampleCount * 2) / 2 : 0;
         for (UINT i = 0; i < activeCount; ++i)
         {
-            const float t = static_cast<float>(i) / static_cast<float>(activeCount - 1);
-            float radius = 0.5f + 0.4f * sampleAt(right, i + sampleOffset) + waveParam;
-            if (i < activeCount / 10)
+            const UINT sampleIndex = i == circularSampleCount ? 0u : i;
+            const float t = static_cast<float>(sampleIndex) / static_cast<float>(circularSampleCount - 1);
+            float radius = 0.5f + 0.4f * sampleAt(right, sampleIndex + sampleOffset) + waveParam;
+            if (sampleIndex < circularSampleCount / 10)
             {
-                const float mix = 0.5f - 0.5f * cosf((static_cast<float>(i) / (static_cast<float>(activeCount) * 0.1f)) * 3.1415927f);
-                const float radius2 = 0.5f + 0.4f * sampleAt(right, i + activeCount + sampleOffset) + waveParam;
+                const float mix = 0.5f - 0.5f * cosf((static_cast<float>(sampleIndex) / (static_cast<float>(circularSampleCount) * 0.1f)) * 3.1415927f);
+                const float radius2 = 0.5f + 0.4f * sampleAt(right, sampleIndex + circularSampleCount + sampleOffset) + waveParam;
                 radius = radius2 * (1.0f - mix) + radius * mix;
             }
 
@@ -1305,7 +1425,7 @@ void D3D12Resources::DrawWaveform(const float* left,
     }
     else if (waveMode == 1)
     {
-        activeCount = std::min<UINT>(sourceCount > 33 ? sourceCount / 2 : sourceCount, 240u);
+        activeCount = std::min<UINT>(sourceCount > 33 ? sourceCount / 2 : sourceCount, 288u);
         for (UINT i = 0; i < activeCount; ++i)
         {
             const float radius = std::clamp((0.53f + 0.43f * sampleAt(right, i) + waveParam) * responsiveScale, -2.0f, 2.0f);
@@ -1315,7 +1435,7 @@ void D3D12Resources::DrawWaveform(const float* left,
     }
     else if (waveMode == 2 || waveMode == 3)
     {
-        activeCount = std::min<UINT>(sourceCount > 33 ? sourceCount - 33 : sourceCount, 480u);
+        activeCount = sourceCount > 33 ? sourceCount - 33 : sourceCount;
         const float xyScale = responsiveScale;
         for (UINT i = 0; i < activeCount; ++i)
         {
@@ -1349,19 +1469,19 @@ void D3D12Resources::DrawWaveform(const float* left,
     }
     else if (waveMode == 5)
     {
-        activeCount = std::min<UINT>(sourceCount > 33 ? sourceCount - 33 : sourceCount, 480u);
+        activeCount = sourceCount > 33 ? sourceCount - 33 : sourceCount;
         const float rotC = cosf(timeSeconds * 0.3f);
         const float rotS = sinf(timeSeconds * 0.3f);
         for (UINT i = 0; i < activeCount; ++i)
         {
             const float x0 = sampleAt(right, i) * sampleAt(left, i + 32) + sampleAt(left, i) * sampleAt(right, i + 32);
             const float y0 = sampleAt(right, i) * sampleAt(right, i) - sampleAt(left, i + 32) * sampleAt(left, i + 32);
-            writePoint(0, i, (x0 * rotC - y0 * rotS) * responsiveScale, (x0 * rotS + y0 * rotC) * responsiveScale, baseR, baseG, baseB);
+            writePoint(0, i, (x0 * rotC - y0 * rotS) * responsiveScale, -(x0 * rotS + y0 * rotC) * responsiveScale, baseR, baseG, baseB);
         }
     }
     else
     {
-        activeCount = waveMode == 8 ? 256u : std::min<UINT>(sourceCount > 33 ? sourceCount / 2 : sourceCount, 240u);
+        activeCount = waveMode == 8 ? 256u : std::min<UINT>(sourceCount > 33 ? sourceCount / 2 : sourceCount, 288u);
         visibleSegments = waveMode == 7 ? 2u : 1u;
         const UINT sampleOffset = (waveMode == 8 || sourceCount <= activeCount) ? 0 : (sourceCount - activeCount) / 2;
         const float angle = 1.57f * waveParam;
@@ -1372,8 +1492,8 @@ void D3D12Resources::DrawWaveform(const float* left,
             centerX * cosf(angle + 1.57f) + dx * 3.0f,
         };
         float edgeY[2] = {
-            -centerX * sinf(angle + 1.57f) + dy * 3.0f,
-            -centerX * sinf(angle + 1.57f) - dy * 3.0f,
+            -(centerX * sinf(angle + 1.57f) - dy * 3.0f),
+            -(centerX * sinf(angle + 1.57f) + dy * 3.0f),
         };
         for (int edge = 0; edge < 2; ++edge)
         {
@@ -1427,8 +1547,9 @@ void D3D12Resources::DrawWaveform(const float* left,
         dy = (edgeY[1] - edgeY[0]) / static_cast<float>(activeCount);
         const float clippedAngle = atan2f(dy, dx);
         const float perpX = cosf(clippedAngle + 1.57f);
-        const float perpY = -sinf(clippedAngle + 1.57f);
-        const float sep = waveMode == 7 ? powf(std::clamp(waveY, -1000.0f, 1000.0f), 2.0f) : 0.0f;
+        const float perpY = sinf(clippedAngle + 1.57f);
+        const float legacyWavePosY = waveY * 2.0f - 1.0f;
+        const float sep = waveMode == 7 ? powf(legacyWavePosY * 0.5f + 0.5f, 2.0f) : 0.0f;
         for (UINT i = 0; i < activeCount; ++i)
         {
             const float lineX = edgeX[0] + dx * static_cast<float>(i);
@@ -1547,6 +1668,8 @@ void D3D12Resources::DrawWaveform(const float* left,
         UINT count = 0;
         bool additive = false;
         bool triangleList = false;
+        bool texturedFill = false;
+        size_t shapeIndex = 0;
     };
 
     UINT customShapeVertexStart = lineVertexCount;
@@ -1613,7 +1736,7 @@ void D3D12Resources::DrawWaveform(const float* left,
         const float width = static_cast<float>(std::max<long>(m_outputSize.right - m_outputSize.left, 1));
         const float height = static_cast<float>(std::max<long>(m_outputSize.bottom - m_outputSize.top, 1));
         const float aspectY = width > height ? height / width : 1.0f;
-        customShapeCount = std::min<size_t>(customShapeCount, 256);
+        customShapeCount = std::min<size_t>(customShapeCount, c_maxCustomShapeCommands);
 
         for (size_t shapeIndex = 0; shapeIndex < customShapeCount; ++shapeIndex)
         {
@@ -1636,7 +1759,11 @@ void D3D12Resources::DrawWaveform(const float* left,
                 ringY[side] = centerShapeY + radius * sinf(angle);
             }
 
-            if (!skipSolidFill)
+            if (skipSolidFill)
+            {
+                customShapeDrawBatches.push_back({0, 0, shape.additive, true, true, shapeIndex});
+            }
+            else
             {
                 for (int side = 0; side < sides; ++side)
                 {
@@ -1665,7 +1792,7 @@ void D3D12Resources::DrawWaveform(const float* left,
 
                 const UINT fillStart = customShapeVertexStart;
                 const UINT fillCount = customShapeVertexCount;
-                customShapeDrawBatches.push_back({fillStart, fillCount, shape.additive, true});
+                customShapeDrawBatches.push_back({fillStart, fillCount, shape.additive, true, false, shapeIndex});
                 customShapeVertexStart += customShapeVertexCount;
                 customShapeVertexCount = 0;
             }
@@ -1694,7 +1821,7 @@ void D3D12Resources::DrawWaveform(const float* left,
                 }
                 const UINT borderStart = customShapeVertexStart;
                 const UINT borderCount = customShapeVertexCount;
-                customShapeDrawBatches.push_back({borderStart, borderCount, shape.additive, false});
+                customShapeDrawBatches.push_back({borderStart, borderCount, shape.additive, false, false, shapeIndex});
                 customShapeVertexStart += customShapeVertexCount;
                 customShapeVertexCount = 0;
             }
@@ -1978,21 +2105,157 @@ void D3D12Resources::DrawWaveform(const float* left,
     scissor.right = static_cast<LONG>(viewport.Width);
     scissor.bottom = static_cast<LONG>(viewport.Height);
 
+    auto copyRenderTargetToPostProcessSourceAndResume = [&]() -> bool {
+        barrier.Transition.pResource = m_renderTargets[m_frameIndex].Get();
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        m_commandList->ResourceBarrier(1, &barrier);
+
+        const bool copied = CopyBackBufferToPostProcessSource();
+
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        m_commandList->ResourceBarrier(1, &barrier);
+
+        m_commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
+        m_commandList->RSSetViewports(1, &viewport);
+        m_commandList->RSSetScissorRects(1, &scissor);
+        return copied;
+    };
+
+    auto copyShaderSourceToPostProcessSource = [&](ID3D12Resource* sourceTexture) -> bool {
+        if (!sourceTexture || !m_postProcessTexture)
+        {
+            return false;
+        }
+
+        D3D12_RESOURCE_BARRIER copyBarriers[2]{};
+        copyBarriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        copyBarriers[0].Transition.pResource = sourceTexture;
+        copyBarriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        copyBarriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        copyBarriers[0].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        copyBarriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        copyBarriers[1].Transition.pResource = m_postProcessTexture.Get();
+        copyBarriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        copyBarriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+        copyBarriers[1].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        m_commandList->ResourceBarrier(static_cast<UINT>(std::size(copyBarriers)), copyBarriers);
+
+        m_commandList->CopyResource(m_postProcessTexture.Get(), sourceTexture);
+
+        copyBarriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        copyBarriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        copyBarriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+        copyBarriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        m_commandList->ResourceBarrier(static_cast<UINT>(std::size(copyBarriers)), copyBarriers);
+        return true;
+    };
+
+    auto restoreCurrentRenderTarget = [&]() {
+        m_commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
+        m_commandList->RSSetViewports(1, &viewport);
+        m_commandList->RSSetScissorRects(1, &scissor);
+    };
+
+    auto drawMotionVectors = [&]() {
+        if (motionVectorVertexCount == 0)
+        {
+            return;
+        }
+
+        m_commandList->SetPipelineState(m_waveformPipelineState.Get());
+        m_commandList->SetGraphicsRootSignature(m_waveformRootSignature.Get());
+        m_commandList->IASetVertexBuffers(0, 1, &m_waveformVertexBufferView);
+        m_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_LINELIST);
+        m_commandList->DrawInstanced(motionVectorVertexCount, 1, motionVectorVertexStart, 0);
+    };
+
+    D3D12_GPU_DESCRIPTOR_HANDLE feedbackSourceSrv{};
+    if (m_feedbackSrvHeap)
+    {
+        feedbackSourceSrv = m_feedbackSrvHeap->GetGPUDescriptorHandleForHeapStart();
+        feedbackSourceSrv.ptr += static_cast<SIZE_T>(previousFeedbackIndex) * m_feedbackSrvDescriptorSize;
+    }
+    ID3D12DescriptorHeap* feedbackSourceHeap = m_feedbackSrvHeap.Get();
+    ID3D12Resource* feedbackSourceTexture = m_feedbackTextures[previousFeedbackIndex].Get();
+    bool motionVectorsPrewarped = false;
+
+    if (motionVectorVertexCount > 0 &&
+        m_feedbackReady[previousFeedbackIndex] &&
+        m_feedbackTextures[previousFeedbackIndex] &&
+        m_feedbackScratchTexture &&
+        m_feedbackSrvHeap)
+    {
+        D3D12_RESOURCE_BARRIER copyToBackBufferBarriers[2]{};
+        copyToBackBufferBarriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        copyToBackBufferBarriers[0].Transition.pResource = m_renderTargets[m_frameIndex].Get();
+        copyToBackBufferBarriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        copyToBackBufferBarriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+        copyToBackBufferBarriers[0].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        copyToBackBufferBarriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        copyToBackBufferBarriers[1].Transition.pResource = m_feedbackTextures[previousFeedbackIndex].Get();
+        copyToBackBufferBarriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        copyToBackBufferBarriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        copyToBackBufferBarriers[1].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        m_commandList->ResourceBarrier(static_cast<UINT>(std::size(copyToBackBufferBarriers)), copyToBackBufferBarriers);
+
+        m_commandList->CopyResource(m_renderTargets[m_frameIndex].Get(), m_feedbackTextures[previousFeedbackIndex].Get());
+
+        copyToBackBufferBarriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+        copyToBackBufferBarriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        copyToBackBufferBarriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        copyToBackBufferBarriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        m_commandList->ResourceBarrier(static_cast<UINT>(std::size(copyToBackBufferBarriers)), copyToBackBufferBarriers);
+
+        restoreCurrentRenderTarget();
+        drawMotionVectors();
+
+        D3D12_RESOURCE_BARRIER copyToScratchBarriers[2]{};
+        copyToScratchBarriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        copyToScratchBarriers[0].Transition.pResource = m_renderTargets[m_frameIndex].Get();
+        copyToScratchBarriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        copyToScratchBarriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        copyToScratchBarriers[0].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        copyToScratchBarriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        copyToScratchBarriers[1].Transition.pResource = m_feedbackScratchTexture.Get();
+        copyToScratchBarriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        copyToScratchBarriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+        copyToScratchBarriers[1].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        m_commandList->ResourceBarrier(static_cast<UINT>(std::size(copyToScratchBarriers)), copyToScratchBarriers);
+
+        m_commandList->CopyResource(m_feedbackScratchTexture.Get(), m_renderTargets[m_frameIndex].Get());
+
+        copyToScratchBarriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        copyToScratchBarriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        copyToScratchBarriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+        copyToScratchBarriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        m_commandList->ResourceBarrier(static_cast<UINT>(std::size(copyToScratchBarriers)), copyToScratchBarriers);
+
+        restoreCurrentRenderTarget();
+        m_commandList->ClearRenderTargetView(rtvHandle, bg, 0, nullptr);
+
+        feedbackSourceSrv = m_feedbackSrvHeap->GetGPUDescriptorHandleForHeapStart();
+        feedbackSourceSrv.ptr += static_cast<SIZE_T>(c_feedbackScratchSrvIndex) * m_feedbackSrvDescriptorSize;
+        feedbackSourceHeap = m_feedbackSrvHeap.Get();
+        feedbackSourceTexture = m_feedbackScratchTexture.Get();
+        motionVectorsPrewarped = true;
+    }
+
     m_textureVertexCursor = 0;
     m_commandList->SetGraphicsRootSignature(m_waveformRootSignature.Get());
     m_commandList->RSSetViewports(1, &viewport);
     m_commandList->RSSetScissorRects(1, &scissor);
 
-    if (m_feedbackReady[previousFeedbackIndex] && m_feedbackSrvHeap)
+    if (!suppressVisualFeedback && m_feedbackReady[previousFeedbackIndex] && m_feedbackSrvHeap)
     {
-        auto feedbackSrv = m_feedbackSrvHeap->GetGPUDescriptorHandleForHeapStart();
-        feedbackSrv.ptr += static_cast<SIZE_T>(previousFeedbackIndex) * m_feedbackSrvDescriptorSize;
         const float baseFeedbackAlpha = 1.0f;
 
         if (hasTextureWarpMesh && baseFeedbackAlpha > 0.001f)
         {
-            DrawTextureMeshFromSrv(feedbackSrv,
-                                   m_feedbackSrvHeap.Get(),
+            DrawTextureMeshFromSrv(feedbackSourceSrv,
+                                   feedbackSourceHeap,
                                    textureWarpVertices,
                                    textureWarpVertexCount,
                                    bass,
@@ -2003,27 +2266,36 @@ void D3D12Resources::DrawWaveform(const float* left,
                                    true,
                                    false,
                                    true,
-                                   m_feedbackTextures[previousFeedbackIndex].Get());
+                                   feedbackSourceTexture,
+                                   textureWrap);
         }
         else if (!hasTextureWarpMesh && baseFeedbackAlpha > 0.001f)
         {
-            DrawTextureQuadFromSrv(feedbackSrv, m_feedbackSrvHeap.Get(), bass, mids, treble, decay, zoom, rot, baseFeedbackAlpha, 1.0f, 0.0f, false, false, motionCenterX, motionCenterY, motionDX, motionDY, motionStretchX, motionStretchY, motionWarp, true);
+            DrawTextureQuadFromSrv(feedbackSourceSrv, feedbackSourceHeap, bass, mids, treble, decay, zoom, rot, baseFeedbackAlpha, 1.0f, 0.0f, false, false, motionCenterX, motionCenterY, motionDX, motionDY, motionStretchX, motionStretchY, motionWarp, true, false, textureWrap);
         }
     }
-    else if (resumeFeedbackUsable && m_feedbackSrvHeap)
+    else if (!suppressVisualFeedback && resumeFeedbackUsable && m_feedbackSrvHeap)
     {
         auto resumeSrv = m_feedbackSrvHeap->GetGPUDescriptorHandleForHeapStart();
-        resumeSrv.ptr += static_cast<SIZE_T>(2) * m_feedbackSrvDescriptorSize;
-        DrawTextureQuadFromSrv(resumeSrv, m_feedbackSrvHeap.Get(), bass, mids, treble, decay, zoom, rot, 1.0f, 1.0f, 0.0f, false, false, motionCenterX, motionCenterY, motionDX, motionDY, motionStretchX, motionStretchY, motionWarp, true);
+        resumeSrv.ptr += static_cast<SIZE_T>(c_resumeFeedbackSrvIndex) * m_feedbackSrvDescriptorSize;
+        DrawTextureQuadFromSrv(resumeSrv, m_feedbackSrvHeap.Get(), bass, mids, treble, decay, zoom, rot, 1.0f, 1.0f, 0.0f, false, false, motionCenterX, motionCenterY, motionDX, motionDY, motionStretchX, motionStretchY, motionWarp, true, false, textureWrap);
     }
 
     const bool drawStandaloneTextureLayers = !m_presetTextureOverride && m_activeTextureLayerCount > 0;
+    const bool presetBackgroundLayer = drawStandaloneTextureLayers && m_standaloneTextureOverride;
     const float standaloneEnergy = std::clamp(bass * 0.52f + mids * 0.30f + treble * 0.18f, 0.0f, 3.0f);
     const float standalonePulse = std::clamp(standaloneEnergy - 0.70f, 0.0f, 1.60f);
-    const float liveBackgroundAlpha = feedbackSourceReady ?
-        std::clamp(0.16f + standalonePulse * 0.045f + (1.0f - decay) * 0.30f, 0.14f, 0.32f) :
-        1.0f;
-    const float liveExtraLayerAlphaScale = feedbackSourceReady ? 0.55f : 1.0f;
+    const float legacyBackgroundAlpha = feedbackSourceReady ? std::clamp((1.0f - decay) * 0.30f, 0.0f, 0.018f) : 1.0f;
+    const float liveBackgroundAlpha = legacyFixedPipeline && presetBackgroundLayer ?
+        legacyBackgroundAlpha :
+        (feedbackSourceReady ?
+             (presetBackgroundLayer ?
+                  std::clamp(0.070f + standalonePulse * 0.030f + (1.0f - decay) * 0.18f, 0.055f, 0.18f) :
+                  std::clamp(0.16f + standalonePulse * 0.045f + (1.0f - decay) * 0.30f, 0.14f, 0.32f)) :
+             1.0f);
+    const float liveExtraLayerAlphaScale = legacyFixedPipeline && presetBackgroundLayer ?
+        (feedbackSourceReady ? 0.08f : 1.0f) :
+        (feedbackSourceReady ? (presetBackgroundLayer ? 0.35f : 0.55f) : 1.0f);
     if (drawStandaloneTextureLayers && hasTextureWarpMesh && m_srvHeap && m_texturePipelineState && m_textureRootSignature)
     {
         for (UINT layer = 0; layer < m_activeTextureLayerCount && layer < c_maxTextureLayers; ++layer)
@@ -2036,35 +2308,66 @@ void D3D12Resources::DrawWaveform(const float* left,
             auto textureSrv = m_srvHeap->GetGPUDescriptorHandleForHeapStart();
             textureSrv.ptr += static_cast<SIZE_T>(layer) * m_srvDescriptorSize;
             const float layerAlpha = layer == 0 ? liveBackgroundAlpha : std::clamp((0.34f * liveExtraLayerAlphaScale) / static_cast<float>(layer + 1), 0.05f, 0.34f);
-            DrawTextureMeshFromSrv(textureSrv, m_srvHeap.Get(), textureWarpVertices, textureWarpVertexCount, bass, mids, treble, decay, layerAlpha, false);
+            DrawTextureMeshFromSrv(textureSrv, m_srvHeap.Get(), textureWarpVertices, textureWarpVertexCount, bass, mids, treble, decay, layerAlpha, false, false, false, nullptr, textureWrap);
         }
     }
     else if (drawStandaloneTextureLayers)
     {
-        DrawTextureQuad(bass, mids, treble, decay, zoom, rot, motionCenterX, motionCenterY, motionDX, motionDY, motionStretchX, motionStretchY, motionWarp, liveBackgroundAlpha, liveExtraLayerAlphaScale);
+        DrawTextureQuad(bass, mids, treble, decay, zoom, rot, motionCenterX, motionCenterY, motionDX, motionDY, motionStretchX, motionStretchY, motionWarp, liveBackgroundAlpha, liveExtraLayerAlphaScale, textureWrap);
     }
 
-    if (canDrawTexturedShapes)
+    // Legacy MilkDrop binds sampler_main/blur sources for preset composite
+    // shaders to the previous virtual screen, not the just-rendered target.
+    // The current warped scene is still saved below as next frame's feedback.
+    const bool presetCompositeUsesFeedbackSource = presetCompositeActive &&
+                                                  feedbackSourceTexture &&
+                                                  m_feedbackReady[previousFeedbackIndex];
+    const bool copiedLegacyBlurSource = blurTexturesActive &&
+                                        (presetCompositeUsesFeedbackSource ?
+                                             copyShaderSourceToPostProcessSource(feedbackSourceTexture) :
+                                             copyRenderTargetToPostProcessSourceAndResume());
+    if (copiedLegacyBlurSource)
     {
-        auto feedbackSrv = m_feedbackSrvHeap->GetGPUDescriptorHandleForHeapStart();
-        feedbackSrv.ptr += static_cast<SIZE_T>(previousFeedbackIndex) * m_feedbackSrvDescriptorSize;
-        DrawTexturedCustomShapesFromSrv(feedbackSrv, m_feedbackSrvHeap.Get(), customShapes, customShapeCount);
+        RenderBlurTextures(postBlurEdgeDarken);
+        m_commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
+        m_commandList->RSSetViewports(1, &viewport);
+        m_commandList->RSSetScissorRects(1, &scissor);
     }
 
     if (!customShapeDrawBatches.empty())
     {
         ID3D12PipelineState* activeCustomShapePipelineState = nullptr;
         D3D12_PRIMITIVE_TOPOLOGY activeCustomShapeTopology = D3D_PRIMITIVE_TOPOLOGY_UNDEFINED;
-        m_commandList->SetGraphicsRootSignature(m_waveformRootSignature.Get());
-        m_commandList->IASetVertexBuffers(0, 1, &m_waveformVertexBufferView);
+        bool waveformShapePipelineBound = false;
+        auto bindWaveformShapePipeline = [&]() {
+            if (!waveformShapePipelineBound)
+            {
+                m_commandList->SetGraphicsRootSignature(m_waveformRootSignature.Get());
+                m_commandList->IASetVertexBuffers(0, 1, &m_waveformVertexBufferView);
+                activeCustomShapePipelineState = nullptr;
+                activeCustomShapeTopology = D3D_PRIMITIVE_TOPOLOGY_UNDEFINED;
+                waveformShapePipelineBound = true;
+            }
+        };
 
         for (const ShapeDrawBatch& draw : customShapeDrawBatches)
         {
+            if (draw.texturedFill)
+            {
+                if (canDrawTexturedShapes && customShapes && draw.shapeIndex < customShapeCount)
+                {
+                    DrawTexturedCustomShapesFromSrv(feedbackSourceSrv, feedbackSourceHeap, &customShapes[draw.shapeIndex], 1);
+                    waveformShapePipelineBound = false;
+                }
+                continue;
+            }
+
             if (draw.count == 0)
             {
                 continue;
             }
 
+            bindWaveformShapePipeline();
             ID3D12PipelineState* nextPipelineState = draw.additive ?
                 (draw.triangleList ? m_solidAdditivePipelineState.Get() : m_waveformAdditivePipelineState.Get()) :
                 (draw.triangleList ? m_solidPipelineState.Get() : m_waveformPipelineState.Get());
@@ -2099,9 +2402,10 @@ void D3D12Resources::DrawWaveform(const float* left,
                 continue;
             }
 
+            const bool pointList = draw.topology == D3D_PRIMITIVE_TOPOLOGY_POINTLIST;
             ID3D12PipelineState* nextPipelineState = draw.additive ?
-                (draw.triangleList ? m_solidAdditivePipelineState.Get() : m_waveformAdditivePipelineState.Get()) :
-                (draw.triangleList ? m_solidPipelineState.Get() : m_waveformPipelineState.Get());
+                (draw.triangleList ? m_solidAdditivePipelineState.Get() : (pointList ? m_pointAdditivePipelineState.Get() : m_waveformAdditivePipelineState.Get())) :
+                (draw.triangleList ? m_solidPipelineState.Get() : (pointList ? m_pointPipelineState.Get() : m_waveformPipelineState.Get()));
             const D3D12_PRIMITIVE_TOPOLOGY nextTopology = draw.topology;
 
             if (activeCustomWavePipelineState != nextPipelineState)
@@ -2119,16 +2423,12 @@ void D3D12Resources::DrawWaveform(const float* left,
         }
     }
 
-    if (motionVectorVertexCount > 0)
+    if (motionVectorVertexCount > 0 && !motionVectorsPrewarped)
     {
-        m_commandList->SetPipelineState(m_waveformPipelineState.Get());
-        m_commandList->SetGraphicsRootSignature(m_waveformRootSignature.Get());
-        m_commandList->IASetVertexBuffers(0, 1, &m_waveformVertexBufferView);
-        m_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_LINELIST);
-        m_commandList->DrawInstanced(motionVectorVertexCount, 1, motionVectorVertexStart, 0);
+        drawMotionVectors();
     }
 
-    m_commandList->SetPipelineState(waveformPipelineState);
+    m_commandList->SetPipelineState(waveUseDots ? (waveAdditive ? m_pointAdditivePipelineState.Get() : m_pointPipelineState.Get()) : waveformPipelineState);
     m_commandList->SetGraphicsRootSignature(m_waveformRootSignature.Get());
     m_commandList->IASetVertexBuffers(0, 1, &m_waveformVertexBufferView);
     const UINT waveformPassCount = ((waveThick || waveUseDots) && viewport.Width >= 512.0f) ? 4u : 1u;
@@ -2169,10 +2469,22 @@ void D3D12Resources::DrawWaveform(const float* left,
 
     // Match the legacy path: feedback stores the raw warped scene. Video echo,
     // gamma, hue and invert-style filters are display-only and must not recurse.
-    CopyBackBufferToFeedback(m_feedbackIndex);
+    if (suppressVisualFeedback)
+    {
+        m_feedbackReady[0] = false;
+        m_feedbackReady[1] = false;
+        m_feedbackIndex = 0;
+    }
+    else
+    {
+        CopyBackBufferToFeedback(m_feedbackIndex);
+    }
 
-    const bool copiedPostProcessSource = (postProcessActive || blurTexturesActive) && CopyBackBufferToPostProcessSource();
-    if (copiedPostProcessSource && blurTexturesActive)
+    const bool copiedPostProcessSource = postProcessActive &&
+                                         (presetCompositeUsesFeedbackSource && copiedLegacyBlurSource ?
+                                              true :
+                                              CopyBackBufferToPostProcessSource());
+    if (!copiedLegacyBlurSource && copiedPostProcessSource && blurTexturesActive)
     {
         RenderBlurTextures(postBlurEdgeDarken);
     }
@@ -2199,14 +2511,15 @@ void D3D12Resources::DrawWaveform(const float* left,
                                postBlurEdgeDarken,
                                echoAlpha,
                                echoZoom,
-                               echoOrientation);
+                               echoOrientation,
+                               compositeVertices,
+                               compositeVertexCount);
 
         barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
         barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
         m_commandList->ResourceBarrier(1, &barrier);
     }
 
-    UINT textOverlayVertexStart = customWaveVertexStart + customWaveVertexCopiedCount;
     UINT textOverlayVertexCount = 0;
     const float outputWidth = static_cast<float>(std::max<long>(m_outputSize.right - m_outputSize.left, 1));
     const float outputHeight = static_cast<float>(std::max<long>(m_outputSize.bottom - m_outputSize.top, 1));
@@ -2219,12 +2532,12 @@ void D3D12Resources::DrawWaveform(const float* left,
     const float textShadowOffset = std::max(1.0f, floorf(textCell * 0.33f + 0.5f));
 
     auto writeTextVertex = [&](float pixelXPos, float pixelYPos, float r, float g, float b, float a) {
-        if (textOverlayVertexStart + textOverlayVertexCount >= c_maxWaveformVertices)
+        if (!m_mappedTextOverlayVertices || textOverlayVertexCount >= c_maxTextOverlayVertices)
         {
             return false;
         }
 
-        WaveformVertex& vertex = m_mappedWaveformVertices[textOverlayVertexStart + textOverlayVertexCount++];
+        WaveformVertex& vertex = m_mappedTextOverlayVertices[textOverlayVertexCount++];
         vertex.position[0] = pixelXPos / outputWidth * 2.0f - 1.0f;
         vertex.position[1] = 1.0f - pixelYPos / outputHeight * 2.0f;
         vertex.color[0] = r;
@@ -2269,6 +2582,7 @@ void D3D12Resources::DrawWaveform(const float* left,
         {
             const auto rows = GlyphRows(text[charIndex]);
             const float charX = x + static_cast<float>(charIndex) * advance;
+            const bool drawShadow = shadowOffset > 0.0f;
             for (size_t row = 0; row < rows.size(); ++row)
             {
                 for (int col = 0; col < 5; ++col)
@@ -2280,14 +2594,17 @@ void D3D12Resources::DrawWaveform(const float* left,
 
                     const float px = charX + static_cast<float>(col) * cell;
                     const float py = y + static_cast<float>(row) * cell;
-                    writeTextQuad(px + shadowOffset,
-                                  py + shadowOffset,
-                                  px + cell + shadowOffset,
-                                  py + cell + shadowOffset,
-                                  0.0f,
-                                  0.0f,
-                                  0.0f,
-                                  a * 0.55f);
+                    if (drawShadow)
+                    {
+                        writeTextQuad(px + shadowOffset,
+                                      py + shadowOffset,
+                                      px + cell + shadowOffset,
+                                      py + cell + shadowOffset,
+                                      0.0f,
+                                      0.0f,
+                                      0.0f,
+                                      a * 0.55f);
+                    }
                     writeTextQuad(px, py, px + cell, py + cell, r, g, b, a);
                 }
             }
@@ -2295,6 +2612,244 @@ void D3D12Resources::DrawWaveform(const float* left,
     };
     auto appendTextLine = [&](const std::wstring& text, float x, float y, float maxWidth, float r, float g, float b, float a) {
         appendTextLineScaled(text, x, y, maxWidth, textCell, textShadowOffset, r, g, b, a);
+    };
+    auto wrapTextBlock = [](const std::wstring& text, size_t maxChars) {
+        std::vector<std::wstring> lines;
+        size_t start = 0;
+        maxChars = std::max<size_t>(1, maxChars);
+        while (start <= text.size())
+        {
+            const size_t end = text.find(L'\n', start);
+            std::wstring line = text.substr(start, end == std::wstring::npos ? std::wstring::npos : end - start);
+            if (!line.empty() && line.back() == L'\r')
+            {
+                line.pop_back();
+            }
+
+            while (line.size() > maxChars)
+            {
+                size_t split = line.rfind(L' ', maxChars);
+                if (split == std::wstring::npos || split == 0)
+                {
+                    split = maxChars;
+                }
+                lines.push_back(line.substr(0, split));
+                line.erase(0, split);
+                while (!line.empty() && line.front() == L' ')
+                {
+                    line.erase(0, 1);
+                }
+            }
+            lines.push_back(line);
+
+            if (end == std::wstring::npos)
+            {
+                break;
+            }
+            start = end + 1;
+        }
+        return lines;
+    };
+    auto appendTextBlock = [&](const std::wstring& text, float x, float y, float maxWidth, float r, float g, float b, float a) {
+        size_t start = 0;
+        float lineY = y;
+        while (start <= text.size())
+        {
+            const size_t end = text.find(L'\n', start);
+            std::wstring line = text.substr(start, end == std::wstring::npos ? std::wstring::npos : end - start);
+            if (!line.empty() && line.back() == L'\r')
+            {
+                line.pop_back();
+            }
+            appendTextLine(line, x, lineY, maxWidth, r, g, b, a);
+            if (end == std::wstring::npos)
+            {
+                break;
+            }
+            lineY += glyphHeight + textCell * 2.0f;
+            start = end + 1;
+        }
+    };
+    auto appendRightTextBlock = [&](const std::wstring& text, float right, float y, float maxWidth, float r, float g, float b, float a) {
+        size_t start = 0;
+        float lineY = y;
+        while (start <= text.size())
+        {
+            const size_t end = text.find(L'\n', start);
+            std::wstring line = text.substr(start, end == std::wstring::npos ? std::wstring::npos : end - start);
+            if (!line.empty() && line.back() == L'\r')
+            {
+                line.pop_back();
+            }
+
+            const size_t chars = std::min(line.size(), static_cast<size_t>(std::max<float>(1.0f, floorf(maxWidth / glyphAdvance))));
+            const float textWidth = static_cast<float>(chars) * glyphAdvance;
+            appendTextLine(line, std::max(textMargin, right - textWidth), lineY, maxWidth, r, g, b, a);
+
+            if (end == std::wstring::npos)
+            {
+                break;
+            }
+            lineY += glyphHeight + textCell * 2.0f;
+            start = end + 1;
+        }
+    };
+    auto appendHelpPanel = [&](const std::wstring& text, float x, float y, float maxWidth) {
+        const float helpCell = std::clamp(floorf(textReferenceSize / 380.0f + 0.5f), 1.0f, 4.0f);
+        const float helpAdvance = 6.0f * helpCell;
+        const float helpHeight = 7.0f * helpCell;
+        const float helpLineStep = helpHeight + helpCell;
+        const float helpShadowOffset = 0.0f;
+        const float panelPad = std::clamp(helpCell * 3.0f, 5.0f, 14.0f);
+
+        std::vector<std::wstring> rawLines;
+        size_t start = 0;
+        while (start <= text.size())
+        {
+            const size_t end = text.find(L'\n', start);
+            std::wstring line = text.substr(start, end == std::wstring::npos ? std::wstring::npos : end - start);
+            if (!line.empty() && line.back() == L'\r')
+            {
+                line.pop_back();
+            }
+            rawLines.push_back(line);
+            if (end == std::wstring::npos)
+            {
+                break;
+            }
+            start = end + 1;
+        }
+
+        if (rawLines.empty())
+        {
+            return;
+        }
+
+        bool hasColumns = false;
+        for (const auto& line : rawLines)
+        {
+            hasColumns = hasColumns || line.find(L'\t') != std::wstring::npos;
+        }
+
+        const float panelWidth = hasColumns ? maxWidth : std::min(maxWidth, static_cast<float>(rawLines.front().size()) * helpAdvance + panelPad * 2.0f);
+        const float contentWidth = std::max(helpAdvance, panelWidth - panelPad * 2.0f);
+        const float columnGap = hasColumns ? std::clamp(helpAdvance * 3.0f, 12.0f, 42.0f) : 0.0f;
+        const float columnWidth = hasColumns ? std::max(helpAdvance, (contentWidth - columnGap) * 0.5f) : contentWidth;
+        const size_t fullMaxChars = static_cast<size_t>(std::max<float>(1.0f, floorf(contentWidth / helpAdvance)));
+        const size_t columnMaxChars = static_cast<size_t>(std::max<float>(1.0f, floorf(columnWidth / helpAdvance)));
+
+        struct HelpPanelRow
+        {
+            std::wstring left;
+            std::wstring right;
+            bool columns = false;
+            bool heading = false;
+            bool gapBefore = false;
+            bool gapAfter = false;
+        };
+        std::vector<HelpPanelRow> rows;
+        rows.reserve(rawLines.size() + 8);
+
+        for (size_t lineIndex = 0; lineIndex < rawLines.size(); ++lineIndex)
+        {
+            const std::wstring& rawLine = rawLines[lineIndex];
+            const size_t tab = rawLine.find(L'\t');
+            if (tab != std::wstring::npos)
+            {
+                const bool sectionHeading = lineIndex == 1 ||
+                                            rawLine.find(L"MESSAGES") != std::wstring::npos ||
+                                            (rawLine.find(L"PRESET") != std::wstring::npos && rawLine.find(L"TWEAKS") != std::wstring::npos);
+                std::vector<std::wstring> leftLines = wrapTextBlock(rawLine.substr(0, tab), columnMaxChars);
+                std::vector<std::wstring> rightLines = wrapTextBlock(rawLine.substr(tab + 1), columnMaxChars);
+                const size_t pairRows = std::max(leftLines.size(), rightLines.size());
+                for (size_t rowIndex = 0; rowIndex < pairRows; ++rowIndex)
+                {
+                    HelpPanelRow row{};
+                    row.columns = true;
+                    row.heading = sectionHeading;
+                    row.gapBefore = sectionHeading && rowIndex == 0 && lineIndex > 1;
+                    if (rowIndex < leftLines.size())
+                    {
+                        row.left = leftLines[rowIndex];
+                    }
+                    if (rowIndex < rightLines.size())
+                    {
+                        row.right = rightLines[rowIndex];
+                    }
+                    row.gapAfter = sectionHeading && rowIndex + 1 == pairRows;
+                    rows.push_back(std::move(row));
+                }
+            }
+            else
+            {
+                std::vector<std::wstring> lineRows = wrapTextBlock(rawLine, fullMaxChars);
+                const bool sectionHeading = lineIndex == 0;
+                for (size_t rowIndex = 0; rowIndex < lineRows.size(); ++rowIndex)
+                {
+                    HelpPanelRow row{};
+                    row.left = std::move(lineRows[rowIndex]);
+                    row.heading = sectionHeading;
+                    row.gapAfter = sectionHeading && rowIndex + 1 == lineRows.size();
+                    rows.push_back(std::move(row));
+                }
+            }
+        }
+
+        const float headingGap = helpLineStep;
+        float rowsHeight = rows.empty() ? 0.0f : -helpCell * 2.0f;
+        for (const HelpPanelRow& row : rows)
+        {
+            if (row.gapBefore)
+            {
+                rowsHeight += headingGap;
+            }
+            rowsHeight += helpLineStep;
+            if (row.gapAfter)
+            {
+                rowsHeight += headingGap;
+            }
+        }
+        const float panelHeight = rowsHeight + panelPad * 2.0f;
+        const float panelRight = std::min(outputWidth - textMargin, x + panelWidth);
+        const float panelBottom = std::min(outputHeight - textMargin, y + panelHeight);
+        const float border = std::max(1.0f, helpCell);
+
+        writeTextQuad(x, y, panelRight, panelBottom, 0.0f, 0.0f, 0.0f, 0.84f);
+        writeTextQuad(x, y, panelRight, y + border, 0.45f, 0.78f, 1.0f, 0.48f);
+        writeTextQuad(x, panelBottom - border, panelRight, panelBottom, 0.45f, 0.78f, 1.0f, 0.34f);
+        writeTextQuad(x, y, x + border, panelBottom, 0.45f, 0.78f, 1.0f, 0.34f);
+        writeTextQuad(panelRight - border, y, panelRight, panelBottom, 0.45f, 0.78f, 1.0f, 0.34f);
+
+        float lineY = y + panelPad;
+        for (const HelpPanelRow& row : rows)
+        {
+            if (row.gapBefore)
+            {
+                lineY += headingGap;
+            }
+            if (lineY + helpHeight > panelBottom - panelPad * 0.5f)
+            {
+                break;
+            }
+            const float r = row.heading ? 0.96f : 0.78f;
+            const float g = row.heading ? 0.98f : 0.92f;
+            const float b = row.heading ? 1.0f : 0.98f;
+            const float a = row.heading ? 0.96f : 0.90f;
+            if (row.columns)
+            {
+                appendTextLineScaled(row.left, x + panelPad, lineY, columnWidth, helpCell, helpShadowOffset, r, g, b, a);
+                appendTextLineScaled(row.right, x + panelPad + columnWidth + columnGap, lineY, columnWidth, helpCell, helpShadowOffset, r, g, b, a);
+            }
+            else
+            {
+                appendTextLineScaled(row.left, x + panelPad, lineY, panelRight - x - panelPad * 2.0f, helpCell, helpShadowOffset, r, g, b, a);
+            }
+            lineY += helpLineStep;
+            if (row.gapAfter)
+            {
+                lineY += headingGap;
+            }
+        }
     };
 
     if (!m_overlayTopLeft.empty())
@@ -2304,14 +2859,21 @@ void D3D12Resources::DrawWaveform(const float* left,
     }
     if (!m_overlayDebugLine.empty())
     {
-        appendTextLine(m_overlayDebugLine, textMargin, textMargin + glyphHeight + textCell * 2.0f, outputWidth - textMargin * 2.0f, 0.72f, 0.92f, 1.0f, 0.82f);
+        const bool isHelpPanel = m_overlayDebugLine.find(L'\n') != std::wstring::npos;
+        if (isHelpPanel)
+        {
+            const float panelTop = textMargin + glyphHeight + textCell * 3.0f;
+            appendHelpPanel(m_overlayDebugLine, textMargin, panelTop, outputWidth - textMargin * 2.0f);
+        }
+        else
+        {
+            appendTextBlock(m_overlayDebugLine, textMargin, textMargin + glyphHeight + textCell * 2.0f, outputWidth - textMargin * 2.0f, 0.72f, 0.92f, 1.0f, 0.82f);
+        }
     }
     if (!m_overlayTopRight.empty())
     {
         const float maxWidth = outputWidth * 0.35f;
-        const size_t chars = std::min(m_overlayTopRight.size(), static_cast<size_t>(std::max<float>(1.0f, floorf(maxWidth / glyphAdvance))));
-        const float textWidth = static_cast<float>(chars) * glyphAdvance;
-        appendTextLine(m_overlayTopRight, std::max(textMargin, outputWidth - textWidth - textMargin), textMargin, maxWidth, 0.86f, 1.0f, 0.72f, 0.88f);
+        appendRightTextBlock(m_overlayTopRight, outputWidth - textMargin, textMargin, maxWidth, 0.86f, 1.0f, 0.72f, 0.88f);
     }
     if (!m_overlayBottomLeft.empty())
     {
@@ -2350,9 +2912,9 @@ void D3D12Resources::DrawWaveform(const float* left,
         m_commandList->RSSetScissorRects(1, &scissor);
         m_commandList->SetPipelineState(m_solidPipelineState.Get());
         m_commandList->SetGraphicsRootSignature(m_waveformRootSignature.Get());
-        m_commandList->IASetVertexBuffers(0, 1, &m_waveformVertexBufferView);
+        m_commandList->IASetVertexBuffers(0, 1, &m_textOverlayVertexBufferView);
         m_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        m_commandList->DrawInstanced(textOverlayVertexCount, 1, textOverlayVertexStart, 0);
+        m_commandList->DrawInstanced(textOverlayVertexCount, 1, 0, 0);
 
         barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
         barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
@@ -2373,7 +2935,10 @@ void D3D12Resources::DrawWaveform(const float* left,
 void D3D12Resources::Present()
 {
     const UINT presentFlags = (m_options & DeviceResources::c_AllowTearing) ? DXGI_PRESENT_ALLOW_TEARING : 0u;
-    const UINT syncInterval = (m_options & DeviceResources::c_AllowTearing) ? 0u : 1u;
+    // Foobar owns frame pacing through the UI element timer. Present with
+    // sync interval 0 so DXGI does not silently clamp "Unlimited" or caps
+    // above monitor refresh back to vsync.
+    const UINT syncInterval = 0u;
     ThrowIfFailed(m_swapChain->Present(syncInterval, presentFlags));
     MoveToNextFrame();
 }
@@ -2464,12 +3029,14 @@ void D3D12Resources::CreateTextureResources()
 {
     static constexpr char shaderSource[] = R"(
 Texture2D tex0 : register(t0);
-SamplerState samp0 : register(s0);
+SamplerState sampWrap : register(s0);
+SamplerState sampClamp : register(s1);
 
 struct VSInput
 {
     float2 position : POSITION;
-    float2 uv : TEXCOORD;
+    float4 uv : TEXCOORD0;
+    float2 radAng : TEXCOORD1;
     float4 color : COLOR;
 };
 
@@ -2485,21 +3052,26 @@ PSInput VSMain(VSInput input)
 {
     PSInput output;
     output.position = float4(input.position, 0.0f, 1.0f);
-    output.uv = float4(input.uv, input.uv);
+    output.uv = input.uv;
     output.color = input.color;
-    float2 uvFromCenter = input.uv - float2(0.5f, 0.5f);
-    output.radAng = float2(length(uvFromCenter), atan2(uvFromCenter.y, uvFromCenter.x));
+    output.radAng = input.radAng;
     return output;
 }
 
-float4 PSMain(PSInput input) : SV_TARGET
+float4 PSMainWrap(PSInput input) : SV_TARGET
 {
-    return tex0.Sample(samp0, input.uv.xy) * input.color;
+    return tex0.Sample(sampWrap, input.uv.xy) * input.color;
+}
+
+float4 PSMainClamp(PSInput input) : SV_TARGET
+{
+    return tex0.Sample(sampClamp, input.uv.xy) * input.color;
 }
 )";
 
     ComPtr<ID3DBlob> vertexShader;
-    ComPtr<ID3DBlob> pixelShader;
+    ComPtr<ID3DBlob> pixelShaderWrap;
+    ComPtr<ID3DBlob> pixelShaderClamp;
     ComPtr<ID3DBlob> errorBlob;
     UINT compileFlags = 0;
 #if defined(_DEBUG)
@@ -2507,7 +3079,9 @@ float4 PSMain(PSInput input) : SV_TARGET
 #endif
     ThrowIfFailed(D3DCompile(shaderSource, sizeof(shaderSource), nullptr, nullptr, nullptr, "VSMain", "vs_5_0", compileFlags, 0, vertexShader.GetAddressOf(), errorBlob.GetAddressOf()));
     errorBlob.Reset();
-    ThrowIfFailed(D3DCompile(shaderSource, sizeof(shaderSource), nullptr, nullptr, nullptr, "PSMain", "ps_5_0", compileFlags, 0, pixelShader.GetAddressOf(), errorBlob.GetAddressOf()));
+    ThrowIfFailed(D3DCompile(shaderSource, sizeof(shaderSource), nullptr, nullptr, nullptr, "PSMainWrap", "ps_5_0", compileFlags, 0, pixelShaderWrap.GetAddressOf(), errorBlob.GetAddressOf()));
+    errorBlob.Reset();
+    ThrowIfFailed(D3DCompile(shaderSource, sizeof(shaderSource), nullptr, nullptr, nullptr, "PSMainClamp", "ps_5_0", compileFlags, 0, pixelShaderClamp.GetAddressOf(), errorBlob.GetAddressOf()));
     m_textureVertexShaderBytecode.assign(static_cast<const uint8_t*>(vertexShader->GetBufferPointer()),
                                          static_cast<const uint8_t*>(vertexShader->GetBufferPointer()) + vertexShader->GetBufferSize());
 
@@ -2530,18 +3104,24 @@ float4 PSMain(PSInput input) : SV_TARGET
     rootParameter.DescriptorTable.pDescriptorRanges = &range;
     rootParameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
-    D3D12_STATIC_SAMPLER_DESC sampler{};
-    sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
-    sampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-    sampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-    sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-    sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    D3D12_STATIC_SAMPLER_DESC samplers[2]{};
+    for (UINT index = 0; index < static_cast<UINT>(std::size(samplers)); ++index)
+    {
+        samplers[index].Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+        samplers[index].AddressU = index == 0 ? D3D12_TEXTURE_ADDRESS_MODE_WRAP : D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        samplers[index].AddressV = samplers[index].AddressU;
+        samplers[index].AddressW = samplers[index].AddressU;
+        samplers[index].ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+        samplers[index].MaxLOD = D3D12_FLOAT32_MAX;
+        samplers[index].ShaderRegister = index;
+        samplers[index].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    }
 
     D3D12_ROOT_SIGNATURE_DESC rootSignatureDesc{};
     rootSignatureDesc.NumParameters = 1;
     rootSignatureDesc.pParameters = &rootParameter;
-    rootSignatureDesc.NumStaticSamplers = 1;
-    rootSignatureDesc.pStaticSamplers = &sampler;
+    rootSignatureDesc.NumStaticSamplers = static_cast<UINT>(std::size(samplers));
+    rootSignatureDesc.pStaticSamplers = samplers;
     rootSignatureDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
 
     ComPtr<ID3DBlob> signature;
@@ -2549,16 +3129,16 @@ float4 PSMain(PSInput input) : SV_TARGET
     ThrowIfFailed(m_d3dDevice->CreateRootSignature(0, signature->GetBufferPointer(), signature->GetBufferSize(), IID_PPV_ARGS(m_textureRootSignature.ReleaseAndGetAddressOf())));
 
     D3D12_INPUT_ELEMENT_DESC inputElements[] = {
-        {"POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
-        {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, sizeof(float) * 2, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
-        {"COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, sizeof(float) * 4, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, offsetof(TextureVertex, position), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"TEXCOORD", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, offsetof(TextureVertex, uv), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"TEXCOORD", 1, DXGI_FORMAT_R32G32_FLOAT, 0, offsetof(TextureVertex, radAng), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, offsetof(TextureVertex, color), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
     };
 
     D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc{};
     psoDesc.InputLayout = {inputElements, static_cast<UINT>(std::size(inputElements))};
     psoDesc.pRootSignature = m_textureRootSignature.Get();
     psoDesc.VS = {vertexShader->GetBufferPointer(), vertexShader->GetBufferSize()};
-    psoDesc.PS = {pixelShader->GetBufferPointer(), pixelShader->GetBufferSize()};
     psoDesc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
     psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
     psoDesc.RasterizerState.DepthClipEnable = TRUE;
@@ -2570,26 +3150,36 @@ float4 PSMain(PSInput input) : SV_TARGET
     psoDesc.NumRenderTargets = 1;
     psoDesc.RTVFormats[0] = m_backBufferFormat;
     psoDesc.SampleDesc.Count = 1;
-    ThrowIfFailed(m_d3dDevice->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(m_texturePipelineState.ReleaseAndGetAddressOf())));
+    auto createTexturePipeline = [&](ID3DBlob* pixelShader, bool alphaBlend, bool additive, ID3D12PipelineState** pipelineState) {
+        psoDesc.PS = {pixelShader->GetBufferPointer(), pixelShader->GetBufferSize()};
+        psoDesc.BlendState = {};
+        auto& renderTargetBlend = psoDesc.BlendState.RenderTarget[0];
+        renderTargetBlend.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+        if (alphaBlend)
+        {
+            renderTargetBlend.BlendEnable = TRUE;
+            renderTargetBlend.SrcBlend = D3D12_BLEND_SRC_ALPHA;
+            renderTargetBlend.DestBlend = additive ? D3D12_BLEND_ONE : D3D12_BLEND_INV_SRC_ALPHA;
+            renderTargetBlend.BlendOp = D3D12_BLEND_OP_ADD;
+            renderTargetBlend.SrcBlendAlpha = D3D12_BLEND_ONE;
+            renderTargetBlend.DestBlendAlpha = additive ? D3D12_BLEND_ONE : D3D12_BLEND_INV_SRC_ALPHA;
+            renderTargetBlend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+        }
+        ThrowIfFailed(m_d3dDevice->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(pipelineState)));
+    };
 
-    psoDesc.BlendState.RenderTarget[0].BlendEnable = TRUE;
-    psoDesc.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_SRC_ALPHA;
-    psoDesc.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
-    psoDesc.BlendState.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
-    psoDesc.BlendState.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ONE;
-    psoDesc.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
-    psoDesc.BlendState.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
-    ThrowIfFailed(m_d3dDevice->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(m_textureAlphaPipelineState.ReleaseAndGetAddressOf())));
-
-    psoDesc.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_ONE;
-    psoDesc.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_ONE;
-    ThrowIfFailed(m_d3dDevice->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(m_textureAdditivePipelineState.ReleaseAndGetAddressOf())));
+    createTexturePipeline(pixelShaderWrap.Get(), false, false, m_texturePipelineState.ReleaseAndGetAddressOf());
+    createTexturePipeline(pixelShaderClamp.Get(), false, false, m_textureClampPipelineState.ReleaseAndGetAddressOf());
+    createTexturePipeline(pixelShaderWrap.Get(), true, false, m_textureAlphaPipelineState.ReleaseAndGetAddressOf());
+    createTexturePipeline(pixelShaderClamp.Get(), true, false, m_textureAlphaClampPipelineState.ReleaseAndGetAddressOf());
+    createTexturePipeline(pixelShaderWrap.Get(), true, true, m_textureAdditivePipelineState.ReleaseAndGetAddressOf());
+    createTexturePipeline(pixelShaderClamp.Get(), true, true, m_textureAdditiveClampPipelineState.ReleaseAndGetAddressOf());
 
     const TextureVertex vertices[] = {
-        {{-1.0f, 1.0f}, {0.0f, 0.0f}, {0.55f, 0.55f, 0.55f, 0.32f}},
-        {{1.0f, 1.0f}, {1.0f, 0.0f}, {0.55f, 0.55f, 0.55f, 0.32f}},
-        {{-1.0f, -1.0f}, {0.0f, 1.0f}, {0.55f, 0.55f, 0.55f, 0.32f}},
-        {{1.0f, -1.0f}, {1.0f, 1.0f}, {0.55f, 0.55f, 0.55f, 0.32f}},
+        {{-1.0f, 1.0f}, {0.0f, 0.0f, 0.0f, 0.0f}, {0.70710678f, -2.35619449f}, {0.55f, 0.55f, 0.55f, 0.32f}},
+        {{1.0f, 1.0f}, {1.0f, 0.0f, 1.0f, 0.0f}, {0.70710678f, -0.78539816f}, {0.55f, 0.55f, 0.55f, 0.32f}},
+        {{-1.0f, -1.0f}, {0.0f, 1.0f, 0.0f, 1.0f}, {0.70710678f, 2.35619449f}, {0.55f, 0.55f, 0.55f, 0.32f}},
+        {{1.0f, -1.0f}, {1.0f, 1.0f, 1.0f, 1.0f}, {0.70710678f, 0.78539816f}, {0.55f, 0.55f, 0.55f, 0.32f}},
     };
 
     D3D12_HEAP_PROPERTIES heapProps{};
@@ -2657,17 +3247,18 @@ bool D3D12Resources::LoadTextureFromFile(const wchar_t* textureFile, UINT slotIn
     if (loaded)
     {
         slot.file = textureFile;
-        if (slotIndex == 0)
-        {
-            m_currentTextureFile = textureFile;
-        }
         OutputDebugStringW((std::wstring(L"foo_vis_milk2 DX12 texture loaded: ") + textureFile + L"\n").c_str());
         wchar_t logLine[1024]{};
-        swprintf_s(logLine, L"texture slot %u loaded \"%ls\"", slotIndex, textureFile);
+        swprintf_s(logLine, L"texture slot %u loaded %ux%u \"%ls\"", slotIndex, slot.width, slot.height, textureFile);
         WriteD3D12LogLine(logLine);
     }
     else
     {
+        slot.texture.Reset();
+        slot.uploadBuffer.Reset();
+        slot.file.clear();
+        slot.width = 0;
+        slot.height = 0;
         wchar_t logLine[1024]{};
         swprintf_s(logLine, L"texture slot %u failed \"%ls\"", slotIndex, textureFile);
         WriteD3D12LogLine(logLine);
@@ -3003,7 +3594,13 @@ bool D3D12Resources::UploadTextureSlotData(TextureSlot& slot,
                                            UINT sourceRowPitch,
                                            UINT sourceRowCount)
 {
+    std::lock_guard<std::recursive_mutex> commandLock(m_commandMutex);
+
     if (width == 0 || height == 0 || !pixels || pixelsSize == 0 || sourceRowPitch == 0 || sourceRowCount == 0)
+    {
+        return false;
+    }
+    if (!m_d3dDevice || !m_commandQueue || !m_commandList || !m_commandAllocators[m_frameIndex])
     {
         return false;
     }
@@ -3019,12 +3616,13 @@ bool D3D12Resources::UploadTextureSlotData(TextureSlot& slot,
 
     D3D12_HEAP_PROPERTIES defaultHeap{};
     defaultHeap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    ComPtr<ID3D12Resource> texture;
     ThrowIfFailed(m_d3dDevice->CreateCommittedResource(&defaultHeap,
                                                        D3D12_HEAP_FLAG_NONE,
                                                        &textureDesc,
                                                        D3D12_RESOURCE_STATE_COPY_DEST,
                                                        nullptr,
-                                                       IID_PPV_ARGS(slot.texture.ReleaseAndGetAddressOf())));
+                                                       IID_PPV_ARGS(texture.ReleaseAndGetAddressOf())));
 
     UINT64 uploadSize = 0;
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT layout{};
@@ -3035,7 +3633,6 @@ bool D3D12Resources::UploadTextureSlotData(TextureSlot& slot,
         sourceRowCount > numRows || rowSize > sourceRowPitch || rowSize > layout.Footprint.RowPitch ||
         rowSize > static_cast<UINT64>(std::numeric_limits<size_t>::max()))
     {
-        slot.texture.Reset();
         return false;
     }
 
@@ -3044,7 +3641,6 @@ bool D3D12Resources::UploadTextureSlotData(TextureSlot& slot,
                            rowSize;
     if (destEnd < layout.Offset || destEnd > uploadSize)
     {
-        slot.texture.Reset();
         return false;
     }
 
@@ -3059,46 +3655,45 @@ bool D3D12Resources::UploadTextureSlotData(TextureSlot& slot,
 
     D3D12_HEAP_PROPERTIES uploadHeap{};
     uploadHeap.Type = D3D12_HEAP_TYPE_UPLOAD;
+    ComPtr<ID3D12Resource> uploadBuffer;
     ThrowIfFailed(m_d3dDevice->CreateCommittedResource(&uploadHeap,
                                                        D3D12_HEAP_FLAG_NONE,
                                                        &uploadDesc,
                                                        D3D12_RESOURCE_STATE_GENERIC_READ,
                                                        nullptr,
-                                                       IID_PPV_ARGS(slot.uploadBuffer.ReleaseAndGetAddressOf())));
+                                                       IID_PPV_ARGS(uploadBuffer.ReleaseAndGetAddressOf())));
 
     if (sourceRowPitch > std::numeric_limits<size_t>::max() / sourceRowCount ||
         pixelsSize < static_cast<size_t>(sourceRowPitch) * sourceRowCount)
     {
-        slot.texture.Reset();
-        slot.uploadBuffer.Reset();
         return false;
     }
 
     uint8_t* mapped = nullptr;
-    ThrowIfFailed(slot.uploadBuffer->Map(0, nullptr, reinterpret_cast<void**>(&mapped)));
+    ThrowIfFailed(uploadBuffer->Map(0, nullptr, reinterpret_cast<void**>(&mapped)));
     const size_t copyRowPitch = static_cast<size_t>(rowSize);
     for (UINT row = 0; row < sourceRowCount; ++row)
     {
         memcpy(mapped + layout.Offset + static_cast<size_t>(row) * layout.Footprint.RowPitch, pixels + static_cast<size_t>(row) * sourceRowPitch, copyRowPitch);
     }
-    slot.uploadBuffer->Unmap(0, nullptr);
+    uploadBuffer->Unmap(0, nullptr);
 
     ThrowIfFailed(m_commandAllocators[m_frameIndex]->Reset());
     ThrowIfFailed(m_commandList->Reset(m_commandAllocators[m_frameIndex].Get(), nullptr));
 
     D3D12_TEXTURE_COPY_LOCATION dst{};
-    dst.pResource = slot.texture.Get();
+    dst.pResource = texture.Get();
     dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
 
     D3D12_TEXTURE_COPY_LOCATION src{};
-    src.pResource = slot.uploadBuffer.Get();
+    src.pResource = uploadBuffer.Get();
     src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
     src.PlacedFootprint = layout;
     m_commandList->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
 
     D3D12_RESOURCE_BARRIER barrier{};
     barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    barrier.Transition.pResource = slot.texture.Get();
+    barrier.Transition.pResource = texture.Get();
     barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
     barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
     barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
@@ -3107,8 +3702,15 @@ bool D3D12Resources::UploadTextureSlotData(TextureSlot& slot,
     ThrowIfFailed(m_commandList->Close());
     ID3D12CommandList* commandLists[] = {m_commandList.Get()};
     m_commandQueue->ExecuteCommandLists(1, commandLists);
-    WaitForGpu();
+    if (!WaitForGpu())
+    {
+        return false;
+    }
 
+    slot.texture = texture;
+    slot.uploadBuffer.Reset();
+    slot.width = width;
+    slot.height = height;
     return true;
 }
 
@@ -3348,8 +3950,14 @@ bool D3D12Resources::UploadTextureVolumeSlotData(TextureSlot& slot,
                                                  UINT sourceRowCount,
                                                  UINT sourceDepthCount)
 {
+    std::lock_guard<std::recursive_mutex> commandLock(m_commandMutex);
+
     if (width == 0 || height == 0 || depth == 0 || !pixels || pixelsSize == 0 || sourceRowPitch == 0 || sourceRowCount == 0 || sourceDepthCount == 0 ||
         depth > static_cast<UINT>(std::numeric_limits<UINT16>::max()))
+    {
+        return false;
+    }
+    if (!m_d3dDevice || !m_commandQueue || !m_commandList || !m_commandAllocators[m_frameIndex])
     {
         return false;
     }
@@ -3365,12 +3973,13 @@ bool D3D12Resources::UploadTextureVolumeSlotData(TextureSlot& slot,
 
     D3D12_HEAP_PROPERTIES defaultHeap{};
     defaultHeap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    ComPtr<ID3D12Resource> texture;
     ThrowIfFailed(m_d3dDevice->CreateCommittedResource(&defaultHeap,
                                                        D3D12_HEAP_FLAG_NONE,
                                                        &textureDesc,
                                                        D3D12_RESOURCE_STATE_COPY_DEST,
                                                        nullptr,
-                                                       IID_PPV_ARGS(slot.texture.ReleaseAndGetAddressOf())));
+                                                       IID_PPV_ARGS(texture.ReleaseAndGetAddressOf())));
 
     UINT64 uploadSize = 0;
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT layout{};
@@ -3382,14 +3991,12 @@ bool D3D12Resources::UploadTextureVolumeSlotData(TextureSlot& slot,
         rowSize > sourceRowPitch || rowSize > layout.Footprint.RowPitch ||
         rowSize > static_cast<UINT64>(std::numeric_limits<size_t>::max()))
     {
-        slot.texture.Reset();
         return false;
     }
 
     const UINT64 destSlicePitch = static_cast<UINT64>(layout.Footprint.RowPitch) * numRows;
     if (numRows != 0 && destSlicePitch / numRows != layout.Footprint.RowPitch)
     {
-        slot.texture.Reset();
         return false;
     }
 
@@ -3399,7 +4006,6 @@ bool D3D12Resources::UploadTextureVolumeSlotData(TextureSlot& slot,
                            rowSize;
     if (destEnd < layout.Offset || destEnd > uploadSize)
     {
-        slot.texture.Reset();
         return false;
     }
 
@@ -3414,30 +4020,27 @@ bool D3D12Resources::UploadTextureVolumeSlotData(TextureSlot& slot,
 
     D3D12_HEAP_PROPERTIES uploadHeap{};
     uploadHeap.Type = D3D12_HEAP_TYPE_UPLOAD;
+    ComPtr<ID3D12Resource> uploadBuffer;
     ThrowIfFailed(m_d3dDevice->CreateCommittedResource(&uploadHeap,
                                                        D3D12_HEAP_FLAG_NONE,
                                                        &uploadDesc,
                                                        D3D12_RESOURCE_STATE_GENERIC_READ,
                                                        nullptr,
-                                                       IID_PPV_ARGS(slot.uploadBuffer.ReleaseAndGetAddressOf())));
+                                                       IID_PPV_ARGS(uploadBuffer.ReleaseAndGetAddressOf())));
 
     if (sourceRowPitch > std::numeric_limits<size_t>::max() / sourceRowCount)
     {
-        slot.texture.Reset();
-        slot.uploadBuffer.Reset();
         return false;
     }
     const size_t sourceSlicePitch = static_cast<size_t>(sourceRowPitch) * sourceRowCount;
     if (sourceSlicePitch > std::numeric_limits<size_t>::max() / sourceDepthCount ||
         pixelsSize < sourceSlicePitch * sourceDepthCount)
     {
-        slot.texture.Reset();
-        slot.uploadBuffer.Reset();
         return false;
     }
 
     uint8_t* mapped = nullptr;
-    ThrowIfFailed(slot.uploadBuffer->Map(0, nullptr, reinterpret_cast<void**>(&mapped)));
+    ThrowIfFailed(uploadBuffer->Map(0, nullptr, reinterpret_cast<void**>(&mapped)));
     const size_t copyRowPitch = static_cast<size_t>(rowSize);
     const size_t destSlicePitchSize = static_cast<size_t>(destSlicePitch);
     for (UINT slice = 0; slice < sourceDepthCount; ++slice)
@@ -3449,24 +4052,24 @@ bool D3D12Resources::UploadTextureVolumeSlotData(TextureSlot& slot,
                    copyRowPitch);
         }
     }
-    slot.uploadBuffer->Unmap(0, nullptr);
+    uploadBuffer->Unmap(0, nullptr);
 
     ThrowIfFailed(m_commandAllocators[m_frameIndex]->Reset());
     ThrowIfFailed(m_commandList->Reset(m_commandAllocators[m_frameIndex].Get(), nullptr));
 
     D3D12_TEXTURE_COPY_LOCATION dst{};
-    dst.pResource = slot.texture.Get();
+    dst.pResource = texture.Get();
     dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
 
     D3D12_TEXTURE_COPY_LOCATION src{};
-    src.pResource = slot.uploadBuffer.Get();
+    src.pResource = uploadBuffer.Get();
     src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
     src.PlacedFootprint = layout;
     m_commandList->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
 
     D3D12_RESOURCE_BARRIER barrier{};
     barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    barrier.Transition.pResource = slot.texture.Get();
+    barrier.Transition.pResource = texture.Get();
     barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
     barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
     barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
@@ -3475,8 +4078,13 @@ bool D3D12Resources::UploadTextureVolumeSlotData(TextureSlot& slot,
     ThrowIfFailed(m_commandList->Close());
     ID3D12CommandList* commandLists[] = {m_commandList.Get()};
     m_commandQueue->ExecuteCommandLists(1, commandLists);
-    WaitForGpu();
+    if (!WaitForGpu())
+    {
+        return false;
+    }
 
+    slot.texture = texture;
+    slot.uploadBuffer.Reset();
     return true;
 }
 
@@ -3513,7 +4121,8 @@ cbuffer Effects : register(b0)
 struct VSInput
 {
     float2 position : POSITION;
-    float2 uv : TEXCOORD;
+    float4 uv : TEXCOORD0;
+    float2 radAng : TEXCOORD1;
     float4 color : COLOR;
 };
 
@@ -3529,10 +4138,9 @@ PSInput VSMain(VSInput input)
 {
     PSInput output;
     output.position = float4(input.position, 0.0f, 1.0f);
-    output.uv = input.uv;
+    output.uv = input.uv.xy;
     output.color = input.color;
-    float2 uvFromCenter = input.uv - float2(0.5f, 0.5f);
-    output.radAng = float2(length(uvFromCenter), atan2(uvFromCenter.y, uvFromCenter.x));
+    output.radAng = input.radAng;
     return output;
 }
 
@@ -3732,9 +4340,10 @@ float4 PSBlurVertical(PSInput input) : SV_TARGET
     ThrowIfFailed(m_d3dDevice->CreateRootSignature(0, signature->GetBufferPointer(), signature->GetBufferSize(), IID_PPV_ARGS(m_postProcessRootSignature.ReleaseAndGetAddressOf())));
 
     D3D12_INPUT_ELEMENT_DESC inputElements[] = {
-        {"POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
-        {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, sizeof(float) * 2, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
-        {"COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, sizeof(float) * 4, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, offsetof(TextureVertex, position), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"TEXCOORD", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, offsetof(TextureVertex, uv), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"TEXCOORD", 1, DXGI_FORMAT_R32G32_FLOAT, 0, offsetof(TextureVertex, radAng), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, offsetof(TextureVertex, color), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
     };
 
     D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc{};
@@ -3824,9 +4433,10 @@ bool D3D12Resources::CreatePresetWarpPipeline()
     }
 
     D3D12_INPUT_ELEMENT_DESC inputElements[] = {
-        {"POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
-        {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, sizeof(float) * 2, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
-        {"COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, sizeof(float) * 4, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, offsetof(TextureVertex, position), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"TEXCOORD", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, offsetof(TextureVertex, uv), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"TEXCOORD", 1, DXGI_FORMAT_R32G32_FLOAT, 0, offsetof(TextureVertex, radAng), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, offsetof(TextureVertex, color), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
     };
 
     D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc{};
@@ -3837,13 +4447,7 @@ bool D3D12Resources::CreatePresetWarpPipeline()
     psoDesc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
     psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
     psoDesc.RasterizerState.DepthClipEnable = TRUE;
-    psoDesc.BlendState.RenderTarget[0].BlendEnable = TRUE;
-    psoDesc.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_SRC_ALPHA;
-    psoDesc.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
-    psoDesc.BlendState.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
-    psoDesc.BlendState.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ONE;
-    psoDesc.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
-    psoDesc.BlendState.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
+    psoDesc.BlendState.RenderTarget[0].BlendEnable = FALSE;
     psoDesc.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
     psoDesc.DepthStencilState.DepthEnable = FALSE;
     psoDesc.DepthStencilState.StencilEnable = FALSE;
@@ -3881,9 +4485,10 @@ bool D3D12Resources::CreatePresetCompositePipeline()
     }
 
     D3D12_INPUT_ELEMENT_DESC inputElements[] = {
-        {"POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
-        {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, sizeof(float) * 2, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
-        {"COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, sizeof(float) * 4, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, offsetof(TextureVertex, position), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"TEXCOORD", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, offsetof(TextureVertex, uv), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"TEXCOORD", 1, DXGI_FORMAT_R32G32_FLOAT, 0, offsetof(TextureVertex, radAng), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, offsetof(TextureVertex, color), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
     };
 
     D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc{};
@@ -3936,7 +4541,10 @@ void D3D12Resources::UpdatePresetShaderConstantBuffer()
     const float aspectY = safeWidth > safeHeight ? safeHeight / safeWidth : 1.0f;
     const float bassAvg = (m_presetShaderBass + m_presetShaderMids + m_presetShaderTreble) * (1.0f / 3.0f);
     const float bassAttAvg = (m_presetShaderBassAtt + m_presetShaderMidsAtt + m_presetShaderTrebleAtt) * (1.0f / 3.0f);
-    const float time = std::isfinite(m_presetShaderTime) ? m_presetShaderTime : 0.0f;
+    const float presetTime = std::isfinite(m_presetShaderPresetTime) ? m_presetShaderPresetTime : 0.0f;
+    const float globalTime = std::isfinite(m_presetShaderGlobalTime) ? m_presetShaderGlobalTime : presetTime;
+    const float canvasWidth = std::max(m_presetShaderCanvasWidth, 1.0f);
+    const float canvasHeight = std::max(m_presetShaderCanvasHeight, 1.0f);
 
     std::array<float, 512> constants{};
     auto write4 = [&](size_t offset, float x, float y, float z, float w) {
@@ -3945,12 +4553,41 @@ void D3D12Resources::UpdatePresetShaderConstantBuffer()
         constants[offset + 2] = z;
         constants[offset + 3] = w;
     };
+    auto writeTextureLayerTexsizes = [&]() {
+        static constexpr size_t firstLayerTexsizeOffset = 384;
+        for (UINT layer = 0; layer < c_maxTextureLayers; ++layer)
+        {
+            const TextureSlot& slot = m_textureSlots[layer];
+            const float texWidth = static_cast<float>(std::max<UINT>(slot.width, 1u));
+            const float texHeight = static_cast<float>(std::max<UINT>(slot.height, 1u));
+            write4(firstLayerTexsizeOffset + static_cast<size_t>(layer) * 4,
+                   texWidth,
+                   texHeight,
+                   1.0f / texWidth,
+                   1.0f / texHeight);
+        }
+    };
+    auto writeBlurTexsizes = [&]() {
+        static constexpr size_t firstBlurTexsizeOffset = 448;
+        static constexpr UINT visibleBlurIndices[c_visibleBlurTextureCount] = {1, 3, 5};
+        for (UINT blurIndex = 0; blurIndex < c_visibleBlurTextureCount; ++blurIndex)
+        {
+            const UINT textureIndex = visibleBlurIndices[blurIndex];
+            const float texWidth = static_cast<float>(std::max<UINT>(m_blurTextureWidths[textureIndex], 1u));
+            const float texHeight = static_cast<float>(std::max<UINT>(m_blurTextureHeights[textureIndex], 1u));
+            write4(firstBlurTexsizeOffset + static_cast<size_t>(blurIndex) * 4,
+                   texWidth,
+                   texHeight,
+                   1.0f / texWidth,
+                   1.0f / texHeight);
+        }
+    };
 
     write4(0, m_presetShaderRandFrame[0], m_presetShaderRandFrame[1], m_presetShaderRandFrame[2], m_presetShaderRandFrame[3]);
     write4(4, m_presetShaderRandPreset[0], m_presetShaderRandPreset[1], m_presetShaderRandPreset[2], m_presetShaderRandPreset[3]);
     write4(8, aspectX, aspectY, aspectX > 0.0001f ? 1.0f / aspectX : 1.0f, aspectY > 0.0001f ? 1.0f / aspectY : 1.0f);
     write4(12, 0.0f, 0.0f, 0.0f, 0.0f);
-    write4(16, time, m_presetShaderFps, m_presetShaderFrame, m_presetShaderProgress);
+    write4(16, presetTime, m_presetShaderFps, m_presetShaderFrame, m_presetShaderProgress);
     write4(20, m_presetShaderBass, m_presetShaderMids, m_presetShaderTreble, bassAvg);
     write4(24, m_presetShaderBassAtt, m_presetShaderMidsAtt, m_presetShaderTrebleAtt, bassAttAvg);
     write4(28,
@@ -3963,29 +4600,31 @@ void D3D12Resources::UpdatePresetShaderConstantBuffer()
            m_presetShaderBlurMin[2],
            m_presetShaderBlurMin[0],
            m_presetShaderBlurMax[0]);
-    write4(36, safeWidth, safeHeight, 1.0f / safeWidth, 1.0f / safeHeight);
-    write4(40, 0.5f + 0.5f * cosf(time * 0.329f + 1.2f),
-               0.5f + 0.5f * cosf(time * 1.293f + 3.9f),
-               0.5f + 0.5f * cosf(time * 5.070f + 2.5f),
-               0.5f + 0.5f * cosf(time * 20.051f + 5.4f));
-    write4(44, 0.5f + 0.5f * sinf(time * 0.329f + 1.2f),
-               0.5f + 0.5f * sinf(time * 1.293f + 3.9f),
-               0.5f + 0.5f * sinf(time * 5.070f + 2.5f),
-               0.5f + 0.5f * sinf(time * 20.051f + 5.4f));
-    write4(48, 0.5f + 0.5f * cosf(time * 0.0050f + 2.7f),
-               0.5f + 0.5f * cosf(time * 0.0085f + 5.3f),
-               0.5f + 0.5f * cosf(time * 0.0133f + 4.5f),
-               0.5f + 0.5f * cosf(time * 0.0217f + 3.8f));
-    write4(52, 0.5f + 0.5f * sinf(time * 0.0050f + 2.7f),
-               0.5f + 0.5f * sinf(time * 0.0085f + 5.3f),
-               0.5f + 0.5f * sinf(time * 0.0133f + 4.5f),
-               0.5f + 0.5f * sinf(time * 0.0217f + 3.8f));
+    write4(36, canvasWidth, canvasHeight, 1.0f / canvasWidth, 1.0f / canvasHeight);
+    write4(40, 0.5f + 0.5f * cosf(globalTime * 0.329f + 1.2f),
+               0.5f + 0.5f * cosf(globalTime * 1.293f + 3.9f),
+               0.5f + 0.5f * cosf(globalTime * 5.070f + 2.5f),
+               0.5f + 0.5f * cosf(globalTime * 20.051f + 5.4f));
+    write4(44, 0.5f + 0.5f * sinf(globalTime * 0.329f + 1.2f),
+               0.5f + 0.5f * sinf(globalTime * 1.293f + 3.9f),
+               0.5f + 0.5f * sinf(globalTime * 5.070f + 2.5f),
+               0.5f + 0.5f * sinf(globalTime * 20.051f + 5.4f));
+    write4(48, 0.5f + 0.5f * cosf(globalTime * 0.0050f + 2.7f),
+               0.5f + 0.5f * cosf(globalTime * 0.0085f + 5.3f),
+               0.5f + 0.5f * cosf(globalTime * 0.0133f + 4.5f),
+               0.5f + 0.5f * cosf(globalTime * 0.0217f + 3.8f));
+    write4(52, 0.5f + 0.5f * sinf(globalTime * 0.0050f + 2.7f),
+               0.5f + 0.5f * sinf(globalTime * 0.0085f + 5.3f),
+               0.5f + 0.5f * sinf(globalTime * 0.0133f + 4.5f),
+               0.5f + 0.5f * sinf(globalTime * 0.0217f + 3.8f));
     const float mipX = log2f(safeWidth);
     const float mipY = log2f(safeHeight);
     write4(56, mipX, mipY, (mipX + mipY) * 0.5f, 0.0f);
     write4(60, m_presetShaderBlurMin[1], m_presetShaderBlurMax[1], m_presetShaderBlurMin[2], m_presetShaderBlurMax[2]);
     std::copy_n(m_presetShaderQ, std::size(m_presetShaderQ), constants.data() + 64);
     std::copy_n(m_presetShaderRotMatrices, std::size(m_presetShaderRotMatrices), constants.data() + 96);
+    writeTextureLayerTexsizes();
+    writeBlurTexsizes();
 
     memcpy(m_mappedPostProcessConstantBuffer, constants.data(), sizeof(constants));
 }
@@ -4040,8 +4679,25 @@ void D3D12Resources::CreatePostProcessTexture()
     blurClearValue.Format = m_backBufferFormat;
     blurClearValue.Color[3] = 1.0f;
 
-    UINT blurWidth = width;
-    UINT blurHeight = height;
+    UINT blurSourceWidth = width;
+    UINT blurSourceHeight = height;
+    const UINT maxBlurDimension = std::max(blurSourceWidth, blurSourceHeight);
+    if (maxBlurDimension > c_maxLegacyBlurSourceDimension)
+    {
+        blurSourceWidth = std::max<UINT>(
+            16u,
+            static_cast<UINT>((static_cast<uint64_t>(blurSourceWidth) * c_maxLegacyBlurSourceDimension +
+                               (maxBlurDimension / 2u)) /
+                              maxBlurDimension));
+        blurSourceHeight = std::max<UINT>(
+            16u,
+            static_cast<UINT>((static_cast<uint64_t>(blurSourceHeight) * c_maxLegacyBlurSourceDimension +
+                               (maxBlurDimension / 2u)) /
+                              maxBlurDimension));
+    }
+
+    UINT blurWidth = blurSourceWidth;
+    UINT blurHeight = blurSourceHeight;
     auto blurRtvHandle = m_blurRtvHeap->GetCPUDescriptorHandleForHeapStart();
     for (UINT blurIndex = 0; blurIndex < c_blurRenderTextureCount; ++blurIndex)
     {
@@ -4069,6 +4725,22 @@ void D3D12Resources::CreatePostProcessTexture()
         blurRtvHandle.ptr += m_rtvDescriptorSize;
     }
     m_blurTexturesPrimed = false;
+    {
+        wchar_t logLine[192]{};
+        swprintf_s(logLine,
+                   L"postprocess resources output=%ux%u blur_source=%ux%u blur1=%ux%u blur2=%ux%u blur3=%ux%u",
+                   width,
+                   height,
+                   blurSourceWidth,
+                   blurSourceHeight,
+                   m_blurTextureWidths[1],
+                   m_blurTextureHeights[1],
+                   m_blurTextureWidths[3],
+                   m_blurTextureHeights[3],
+                   m_blurTextureWidths[5],
+                   m_blurTextureHeights[5]);
+        WriteD3D12LogLine(logLine);
+    }
 
     D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
     srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
@@ -4255,7 +4927,12 @@ void D3D12Resources::RefreshTextureFileList()
 bool D3D12Resources::IsPostProcessEnabled() const
 {
     wchar_t value[8]{};
-    return GetEnvironmentVariableW(L"FOO_VIS_MILK2_DX12_POSTPROCESS", value, static_cast<DWORD>(std::size(value))) > 0 && wcscmp(value, L"0") != 0;
+    const DWORD valueLength = GetEnvironmentVariableW(L"FOO_VIS_MILK2_DX12_POSTPROCESS", value, static_cast<DWORD>(std::size(value)));
+    if (valueLength == 0)
+    {
+        return true;
+    }
+    return wcscmp(value, L"0") != 0;
 }
 
 bool D3D12Resources::IsPostProcessBlurEnabled() const
@@ -4304,7 +4981,7 @@ DWORD D3D12Resources::GetTextureCycleIntervalMs() const
 
 void D3D12Resources::MaybeCycleTexture()
 {
-    if (m_presetTextureOverride || !IsTextureCyclingEnabled() || m_textureFiles.empty())
+    if (m_presetTextureOverride || m_standaloneTextureOverride || !IsTextureCyclingEnabled() || m_textureFiles.empty())
     {
         return;
     }
@@ -4339,7 +5016,7 @@ void D3D12Resources::CreateFeedbackResources()
     const UINT height = std::max<UINT>(static_cast<UINT>(m_outputSize.bottom - m_outputSize.top), 1u);
 
     D3D12_DESCRIPTOR_HEAP_DESC srvHeapDesc{};
-    srvHeapDesc.NumDescriptors = 3;
+    srvHeapDesc.NumDescriptors = c_feedbackSrvCount;
     srvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     srvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     ThrowIfFailed(m_d3dDevice->CreateDescriptorHeap(&srvHeapDesc, IID_PPV_ARGS(m_feedbackSrvHeap.ReleaseAndGetAddressOf())));
@@ -4373,6 +5050,22 @@ void D3D12Resources::CreateFeedbackResources()
         srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
         srvDesc.Texture2D.MipLevels = 1;
         m_d3dDevice->CreateShaderResourceView(m_feedbackTextures[i].Get(), &srvDesc, srvHandle);
+        srvHandle.ptr += m_feedbackSrvDescriptorSize;
+    }
+
+    ThrowIfFailed(m_d3dDevice->CreateCommittedResource(&heapProps,
+                                                       D3D12_HEAP_FLAG_NONE,
+                                                       &textureDesc,
+                                                       D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                                                       nullptr,
+                                                       IID_PPV_ARGS(m_feedbackScratchTexture.ReleaseAndGetAddressOf())));
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+        srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srvDesc.Format = textureDesc.Format;
+        srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srvDesc.Texture2D.MipLevels = 1;
+        m_d3dDevice->CreateShaderResourceView(m_feedbackScratchTexture.Get(), &srvDesc, srvHandle);
         srvHandle.ptr += m_feedbackSrvDescriptorSize;
     }
 
@@ -4416,6 +5109,8 @@ void D3D12Resources::ClearResumeFeedback()
 
 bool D3D12Resources::SeedFeedbackTexturesFromResume()
 {
+    std::lock_guard<std::recursive_mutex> commandLock(m_commandMutex);
+
     if (!m_resumeFeedbackReady ||
         !m_resumeFeedbackTexture ||
         !m_feedbackTextures[0] ||
@@ -4502,6 +5197,8 @@ bool D3D12Resources::SeedFeedbackTexturesFromResume()
 
 bool D3D12Resources::CaptureBackBufferForResume()
 {
+    std::lock_guard<std::recursive_mutex> commandLock(m_commandMutex);
+
     ClearResumeFeedback();
 
     if (!m_d3dDevice || !m_commandQueue || !m_fence || !m_renderTargets[m_frameIndex])
@@ -4563,6 +5260,8 @@ bool D3D12Resources::CaptureBackBufferForResume()
 
 bool D3D12Resources::CaptureCurrentFrame(std::vector<uint8_t>* pixels, UINT* width, UINT* height)
 {
+    std::lock_guard<std::recursive_mutex> commandLock(m_commandMutex);
+
     if (!pixels || !width || !height)
     {
         return false;
@@ -4677,6 +5376,8 @@ bool D3D12Resources::CaptureCurrentFrame(std::vector<uint8_t>* pixels, UINT* wid
 
 bool D3D12Resources::SetResumeFeedbackFromFrame(UINT width, UINT height, const std::vector<uint8_t>& pixels)
 {
+    std::lock_guard<std::recursive_mutex> commandLock(m_commandMutex);
+
     ClearResumeFeedback();
 
     if (width == 0 || height == 0 || pixels.empty() || !m_d3dDevice || !m_commandQueue || !m_fence)
@@ -4834,7 +5535,7 @@ bool D3D12Resources::SetResumeFeedbackFromFrame(UINT width, UINT height, const s
     if (m_feedbackSrvHeap)
     {
         auto srvHandle = m_feedbackSrvHeap->GetCPUDescriptorHandleForHeapStart();
-        srvHandle.ptr += static_cast<SIZE_T>(2) * m_feedbackSrvDescriptorSize;
+        srvHandle.ptr += static_cast<SIZE_T>(c_resumeFeedbackSrvIndex) * m_feedbackSrvDescriptorSize;
 
         D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
         srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
@@ -5047,10 +5748,10 @@ bool D3D12Resources::RenderBlurTextures(float blurEdgeDarken)
         const UINT vertexStart = m_textureVertexCursor;
         m_textureVertexCursor += 4;
         const TextureVertex vertices[] = {
-            {{-1.0f, 1.0f}, {0.0f, 0.0f}, {1.0f, 1.0f, 1.0f, 1.0f}},
-            {{1.0f, 1.0f}, {1.0f, 0.0f}, {1.0f, 1.0f, 1.0f, 1.0f}},
-            {{-1.0f, -1.0f}, {0.0f, 1.0f}, {1.0f, 1.0f, 1.0f, 1.0f}},
-            {{1.0f, -1.0f}, {1.0f, 1.0f}, {1.0f, 1.0f, 1.0f, 1.0f}},
+            {{-1.0f, 1.0f}, {0.0f, 0.0f, 0.0f, 0.0f}, {0.70710678f, -2.35619449f}, {1.0f, 1.0f, 1.0f, 1.0f}},
+            {{1.0f, 1.0f}, {1.0f, 0.0f, 1.0f, 0.0f}, {0.70710678f, -0.78539816f}, {1.0f, 1.0f, 1.0f, 1.0f}},
+            {{-1.0f, -1.0f}, {0.0f, 1.0f, 0.0f, 1.0f}, {0.70710678f, 2.35619449f}, {1.0f, 1.0f, 1.0f, 1.0f}},
+            {{1.0f, -1.0f}, {1.0f, 1.0f, 1.0f, 1.0f}, {0.70710678f, 0.78539816f}, {1.0f, 1.0f, 1.0f, 1.0f}},
         };
         memcpy(m_mappedTextureVertices + vertexStart, vertices, sizeof(vertices));
 
@@ -5171,9 +5872,10 @@ void D3D12Resources::DrawTextureQuad(float bass,
                                      float motionStretchY,
                                      float motionWarp,
                                      float baseLayerAlpha,
-                                     float extraLayerAlphaScale)
+                                     float extraLayerAlphaScale,
+                                     bool textureWrap)
 {
-    if (!m_srvHeap || !m_texturePipelineState || !m_textureRootSignature)
+    if (!m_srvHeap || !m_texturePipelineState || !m_textureClampPipelineState || !m_textureRootSignature)
     {
         return;
     }
@@ -5190,7 +5892,7 @@ void D3D12Resources::DrawTextureQuad(float bass,
         const float layerAlpha = layer == 0 ? std::clamp(baseLayerAlpha, 0.0f, 1.0f) : std::clamp((0.42f * extraLayerAlphaScale) / static_cast<float>(layer + 1), 0.05f, 0.42f);
         const float layerZoom = 1.0f + static_cast<float>(layer) * 0.08f;
         const float layerAngle = static_cast<float>(layer) * 0.11f;
-        DrawTextureQuadFromSrv(srvHandle, m_srvHeap.Get(), bass, mids, treble, decay, zoom, rot, layerAlpha, layerZoom, layerAngle, false, false, motionCenterX, motionCenterY, motionDX, motionDY, motionStretchX, motionStretchY, motionWarp, false);
+        DrawTextureQuadFromSrv(srvHandle, m_srvHeap.Get(), bass, mids, treble, decay, zoom, rot, layerAlpha, layerZoom, layerAngle, false, false, motionCenterX, motionCenterY, motionDX, motionDY, motionStretchX, motionStretchY, motionWarp, false, false, textureWrap);
     }
 }
 
@@ -5215,9 +5917,12 @@ void D3D12Resources::DrawTextureQuadFromSrv(D3D12_GPU_DESCRIPTOR_HANDLE srvHandl
                                             float motionStretchY,
                                             float motionWarp,
                                             bool applyDecayTint,
-                                            bool additive)
+                                            bool additive,
+                                            bool textureWrap)
 {
-    ID3D12PipelineState* pipelineState = additive ? m_textureAdditivePipelineState.Get() : m_textureAlphaPipelineState.Get();
+    ID3D12PipelineState* pipelineState = additive ?
+        (textureWrap ? m_textureAdditivePipelineState.Get() : m_textureAdditiveClampPipelineState.Get()) :
+        (textureWrap ? m_textureAlphaPipelineState.Get() : m_textureAlphaClampPipelineState.Get());
     if (!descriptorHeap || !pipelineState || !m_textureRootSignature || !m_mappedTextureVertices)
     {
         return;
@@ -5272,6 +5977,9 @@ void D3D12Resources::DrawTextureQuadFromSrv(D3D12_GPU_DESCRIPTOR_HANDLE srvHandl
         v -= motionDY;
         vertex.uv[0] = flipU ? 1.0f - u : u;
         vertex.uv[1] = flipV ? 1.0f - v : v;
+        vertex.uv[2] = vertex.uv[0];
+        vertex.uv[3] = vertex.uv[1];
+        StoreTextureRadAng(vertex.radAng, vertex.uv[0], vertex.uv[1]);
         vertex.color[0] = tint;
         vertex.color[1] = tint;
         vertex.color[2] = tint;
@@ -5306,7 +6014,7 @@ void D3D12Resources::DrawTexturedCustomShapesFromSrv(D3D12_GPU_DESCRIPTOR_HANDLE
     const float width = static_cast<float>(std::max<long>(m_outputSize.right - m_outputSize.left, 1));
     const float height = static_cast<float>(std::max<long>(m_outputSize.bottom - m_outputSize.top, 1));
     const float aspectY = width > height ? height / width : 1.0f;
-    customShapeCount = std::min<size_t>(customShapeCount, 256);
+    customShapeCount = std::min<size_t>(customShapeCount, c_maxCustomShapeCommands);
 
     ID3D12DescriptorHeap* heaps[] = {descriptorHeap};
     m_commandList->SetDescriptorHeaps(1, heaps);
@@ -5322,6 +6030,9 @@ void D3D12Resources::DrawTexturedCustomShapesFromSrv(D3D12_GPU_DESCRIPTOR_HANDLE
         vertex.position[1] = y;
         vertex.uv[0] = u;
         vertex.uv[1] = v;
+        vertex.uv[2] = u;
+        vertex.uv[3] = v;
+        StoreTextureRadAng(vertex.radAng, u, v);
         vertex.color[0] = std::clamp(r, 0.0f, 1.0f);
         vertex.color[1] = std::clamp(g, 0.0f, 1.0f);
         vertex.color[2] = std::clamp(b, 0.0f, 1.0f);
@@ -5405,7 +6116,8 @@ void D3D12Resources::DrawTextureMeshFromSrv(D3D12_GPU_DESCRIPTOR_HANDLE srvHandl
                                             bool applyDecayTint,
                                             bool additive,
                                             bool usePresetWarpShader,
-                                            ID3D12Resource* shaderSourceTexture)
+                                            ID3D12Resource* shaderSourceTexture,
+                                            bool textureWrap)
 {
     const bool useWarpShader =
         usePresetWarpShader &&
@@ -5416,8 +6128,10 @@ void D3D12Resources::DrawTextureMeshFromSrv(D3D12_GPU_DESCRIPTOR_HANDLE srvHandl
         m_postProcessRootSignature &&
         m_postProcessConstantBuffer &&
         m_mappedPostProcessConstantBuffer;
-    ID3D12PipelineState* pipelineState = useWarpShader ? m_presetWarpPipelineState.Get() :
-        (additive ? m_textureAdditivePipelineState.Get() : m_textureAlphaPipelineState.Get());
+    ID3D12PipelineState* fixedPipelineState = additive ?
+        (textureWrap ? m_textureAdditivePipelineState.Get() : m_textureAdditiveClampPipelineState.Get()) :
+        (textureWrap ? m_textureAlphaPipelineState.Get() : m_textureAlphaClampPipelineState.Get());
+    ID3D12PipelineState* pipelineState = useWarpShader ? m_presetWarpPipelineState.Get() : fixedPipelineState;
     ID3D12RootSignature* rootSignature = useWarpShader ? m_postProcessRootSignature.Get() : m_textureRootSignature.Get();
     if (!descriptorHeap || !vertices || vertexCount < 3 || !pipelineState || !rootSignature || !m_mappedTextureVertices)
     {
@@ -5460,6 +6174,9 @@ void D3D12Resources::DrawTextureMeshFromSrv(D3D12_GPU_DESCRIPTOR_HANDLE srvHandl
         }
         vertex.uv[0] = u;
         vertex.uv[1] = v;
+        vertex.uv[2] = std::isfinite(source.uOrig) ? source.uOrig : source.u;
+        vertex.uv[3] = std::isfinite(source.vOrig) ? source.vOrig : source.v;
+        StoreTextureRadAng(vertex.radAng, source.rad, source.ang, u, v);
         vertex.color[0] = std::clamp(source.r * tint, 0.0f, 1.0f);
         vertex.color[1] = std::clamp(source.g * tint, 0.0f, 1.0f);
         vertex.color[2] = std::clamp(source.b * tint, 0.0f, 1.0f);
@@ -5509,7 +6226,9 @@ void D3D12Resources::DrawPostProcessFromSrv(D3D12_GPU_DESCRIPTOR_HANDLE srvHandl
                                             float blurEdgeDarken,
                                             float echoAlpha,
                                             float echoZoom,
-                                            int echoOrientation)
+                                            int echoOrientation,
+                                            const TextureWarpVertex* compositeVertices,
+                                            size_t compositeVertexCount)
 {
     if (!descriptorHeap ||
         !m_mappedTextureVertices ||
@@ -5517,11 +6236,6 @@ void D3D12Resources::DrawPostProcessFromSrv(D3D12_GPU_DESCRIPTOR_HANDLE srvHandl
         !m_postProcessRootSignature ||
         !m_postProcessConstantBuffer ||
         !m_mappedPostProcessConstantBuffer)
-    {
-        return;
-    }
-
-    if (m_textureVertexCursor + 4 > c_maxTextureVertices)
     {
         return;
     }
@@ -5537,21 +6251,81 @@ void D3D12Resources::DrawPostProcessFromSrv(D3D12_GPU_DESCRIPTOR_HANDLE srvHandl
         std::copy_n(hueShaderColors, std::size(hueColors), hueColors);
     }
 
-    const UINT vertexStart = m_textureVertexCursor;
-    m_textureVertexCursor += 4;
-    const TextureVertex vertices[] = {
-        {{-1.0f, 1.0f}, {0.0f, 0.0f}, {hueColors[3], hueColors[4], hueColors[5], 1.0f}},
-        {{1.0f, 1.0f}, {1.0f, 0.0f}, {hueColors[0], hueColors[1], hueColors[2], 1.0f}},
-        {{-1.0f, -1.0f}, {0.0f, 1.0f}, {hueColors[9], hueColors[10], hueColors[11], 1.0f}},
-        {{1.0f, -1.0f}, {1.0f, 1.0f}, {hueColors[6], hueColors[7], hueColors[8], 1.0f}},
-    };
-    memcpy(m_mappedTextureVertices + vertexStart, vertices, sizeof(vertices));
-
     const float width = static_cast<float>(std::max<long>(m_outputSize.right - m_outputSize.left, 1));
     const float height = static_cast<float>(std::max<long>(m_outputSize.bottom - m_outputSize.top, 1));
 
     std::array<float, 512> constants{};
     const bool usePresetComposite = m_presetCompositePipelineState != nullptr;
+    const bool useCompositeMesh = usePresetComposite && compositeVertices && compositeVertexCount >= 3;
+    const size_t requestedVertexCount = useCompositeMesh ? compositeVertexCount : 4;
+    const UINT copiedVertexCount = static_cast<UINT>(std::min<size_t>(requestedVertexCount, c_maxTextureVertices - m_textureVertexCursor));
+    if ((!useCompositeMesh && copiedVertexCount < 4) || (useCompositeMesh && copiedVertexCount < 3))
+    {
+        return;
+    }
+
+    const UINT vertexStart = m_textureVertexCursor;
+    m_textureVertexCursor += copiedVertexCount;
+    if (usePresetComposite)
+    {
+        static ULONGLONG s_lastPresetCompositeDrawLogTick = 0;
+        const ULONGLONG nowTick = GetTickCount64();
+        if (nowTick - s_lastPresetCompositeDrawLogTick >= 1000)
+        {
+            s_lastPresetCompositeDrawLogTick = nowTick;
+            wchar_t logLine[1536]{};
+            swprintf_s(logLine,
+                       L"preset composite draw use_mesh=%d requested=%llu copied=%u vertex_start=%u output=%ldx%ld q3=%.4f q4=%.4f q10=%.4f q11=%.6f q12=%.6f "
+                       L"blur1=%ux%u blur2=%ux%u blur3=%ux%u",
+                       useCompositeMesh ? 1 : 0,
+                       static_cast<unsigned long long>(requestedVertexCount),
+                       copiedVertexCount,
+                       vertexStart,
+                       m_outputSize.right - m_outputSize.left,
+                       m_outputSize.bottom - m_outputSize.top,
+                       m_presetShaderQ[2],
+                       m_presetShaderQ[3],
+                       m_presetShaderQ[9],
+                       m_presetShaderQ[10],
+                       m_presetShaderQ[11],
+                       m_blurTextureWidths[1],
+                       m_blurTextureHeights[1],
+                       m_blurTextureWidths[3],
+                       m_blurTextureHeights[3],
+                       m_blurTextureWidths[5],
+                       m_blurTextureHeights[5]);
+            WriteD3D12LogLine(logLine);
+        }
+    }
+    if (useCompositeMesh)
+    {
+        for (UINT index = 0; index < copiedVertexCount; ++index)
+        {
+            const TextureWarpVertex& source = compositeVertices[index];
+            TextureVertex& vertex = m_mappedTextureVertices[vertexStart + index];
+            vertex.position[0] = source.x;
+            vertex.position[1] = source.y;
+            vertex.uv[0] = source.u;
+            vertex.uv[1] = source.v;
+            vertex.uv[2] = std::isfinite(source.uOrig) ? source.uOrig : source.u;
+            vertex.uv[3] = std::isfinite(source.vOrig) ? source.vOrig : source.v;
+            StoreTextureRadAng(vertex.radAng, source.rad, source.ang, source.u, source.v);
+            vertex.color[0] = std::clamp(source.r, 0.0f, 1.0f);
+            vertex.color[1] = std::clamp(source.g, 0.0f, 1.0f);
+            vertex.color[2] = std::clamp(source.b, 0.0f, 1.0f);
+            vertex.color[3] = std::clamp(source.a, 0.0f, 1.0f);
+        }
+    }
+    else
+    {
+        const TextureVertex vertices[] = {
+            {{-1.0f, 1.0f}, {0.0f, 0.0f, 0.0f, 0.0f}, {0.70710678f, -2.35619449f}, {hueColors[3], hueColors[4], hueColors[5], 1.0f}},
+            {{1.0f, 1.0f}, {1.0f, 0.0f, 1.0f, 0.0f}, {0.70710678f, -0.78539816f}, {hueColors[0], hueColors[1], hueColors[2], 1.0f}},
+            {{-1.0f, -1.0f}, {0.0f, 1.0f, 0.0f, 1.0f}, {0.70710678f, 2.35619449f}, {hueColors[9], hueColors[10], hueColors[11], 1.0f}},
+            {{1.0f, -1.0f}, {1.0f, 1.0f, 1.0f, 1.0f}, {0.70710678f, 0.78539816f}, {hueColors[6], hueColors[7], hueColors[8], 1.0f}},
+        };
+        memcpy(m_mappedTextureVertices + vertexStart, vertices, sizeof(vertices));
+    }
     if (usePresetComposite)
     {
         auto write4 = [&](size_t offset, float x, float y, float z, float w) {
@@ -5559,6 +6333,35 @@ void D3D12Resources::DrawPostProcessFromSrv(D3D12_GPU_DESCRIPTOR_HANDLE srvHandl
             constants[offset + 1] = y;
             constants[offset + 2] = z;
             constants[offset + 3] = w;
+        };
+        auto writeTextureLayerTexsizes = [&]() {
+            static constexpr size_t firstLayerTexsizeOffset = 384;
+            for (UINT layer = 0; layer < c_maxTextureLayers; ++layer)
+            {
+                const TextureSlot& slot = m_textureSlots[layer];
+                const float texWidth = static_cast<float>(std::max<UINT>(slot.width, 1u));
+                const float texHeight = static_cast<float>(std::max<UINT>(slot.height, 1u));
+                write4(firstLayerTexsizeOffset + static_cast<size_t>(layer) * 4,
+                       texWidth,
+                       texHeight,
+                       1.0f / texWidth,
+                       1.0f / texHeight);
+            }
+        };
+        auto writeBlurTexsizes = [&]() {
+            static constexpr size_t firstBlurTexsizeOffset = 448;
+            static constexpr UINT visibleBlurIndices[c_visibleBlurTextureCount] = {1, 3, 5};
+            for (UINT blurIndex = 0; blurIndex < c_visibleBlurTextureCount; ++blurIndex)
+            {
+                const UINT textureIndex = visibleBlurIndices[blurIndex];
+                const float texWidth = static_cast<float>(std::max<UINT>(m_blurTextureWidths[textureIndex], 1u));
+                const float texHeight = static_cast<float>(std::max<UINT>(m_blurTextureHeights[textureIndex], 1u));
+                write4(firstBlurTexsizeOffset + static_cast<size_t>(blurIndex) * 4,
+                       texWidth,
+                       texHeight,
+                       1.0f / texWidth,
+                       1.0f / texHeight);
+            }
         };
         auto clean = [](float value, float fallback) {
             return std::isfinite(value) ? value : fallback;
@@ -5570,13 +6373,16 @@ void D3D12Resources::DrawPostProcessFromSrv(D3D12_GPU_DESCRIPTOR_HANDLE srvHandl
         const float aspectY = safeWidth > safeHeight ? safeHeight / safeWidth : 1.0f;
         const float bassAvg = (m_presetShaderBass + m_presetShaderMids + m_presetShaderTreble) * (1.0f / 3.0f);
         const float bassAttAvg = (m_presetShaderBassAtt + m_presetShaderMidsAtt + m_presetShaderTrebleAtt) * (1.0f / 3.0f);
-        const float time = clean(m_presetShaderTime, 0.0f);
+        const float presetTime = clean(m_presetShaderPresetTime, 0.0f);
+        const float globalTime = clean(m_presetShaderGlobalTime, presetTime);
+        const float canvasWidth = std::max(clean(m_presetShaderCanvasWidth, 1.0f), 1.0f);
+        const float canvasHeight = std::max(clean(m_presetShaderCanvasHeight, 1.0f), 1.0f);
 
         write4(0, m_presetShaderRandFrame[0], m_presetShaderRandFrame[1], m_presetShaderRandFrame[2], m_presetShaderRandFrame[3]);
         write4(4, m_presetShaderRandPreset[0], m_presetShaderRandPreset[1], m_presetShaderRandPreset[2], m_presetShaderRandPreset[3]);
         write4(8, aspectX, aspectY, aspectX > 0.0001f ? 1.0f / aspectX : 1.0f, aspectY > 0.0001f ? 1.0f / aspectY : 1.0f);
         write4(12, 0.0f, 0.0f, 0.0f, 0.0f);
-        write4(16, time, m_presetShaderFps, m_presetShaderFrame, m_presetShaderProgress);
+        write4(16, presetTime, m_presetShaderFps, m_presetShaderFrame, m_presetShaderProgress);
         write4(20, m_presetShaderBass, m_presetShaderMids, m_presetShaderTreble, bassAvg);
         write4(24, m_presetShaderBassAtt, m_presetShaderMidsAtt, m_presetShaderTrebleAtt, bassAttAvg);
         write4(28,
@@ -5589,29 +6395,31 @@ void D3D12Resources::DrawPostProcessFromSrv(D3D12_GPU_DESCRIPTOR_HANDLE srvHandl
                m_presetShaderBlurMin[2],
                m_presetShaderBlurMin[0],
                m_presetShaderBlurMax[0]);
-        write4(36, safeWidth, safeHeight, 1.0f / safeWidth, 1.0f / safeHeight);
-        write4(40, 0.5f + 0.5f * cosf(time * 0.329f + 1.2f),
-                   0.5f + 0.5f * cosf(time * 1.293f + 3.9f),
-                   0.5f + 0.5f * cosf(time * 5.070f + 2.5f),
-                   0.5f + 0.5f * cosf(time * 20.051f + 5.4f));
-        write4(44, 0.5f + 0.5f * sinf(time * 0.329f + 1.2f),
-                   0.5f + 0.5f * sinf(time * 1.293f + 3.9f),
-                   0.5f + 0.5f * sinf(time * 5.070f + 2.5f),
-                   0.5f + 0.5f * sinf(time * 20.051f + 5.4f));
-        write4(48, 0.5f + 0.5f * cosf(time * 0.0050f + 2.7f),
-                   0.5f + 0.5f * cosf(time * 0.0085f + 5.3f),
-                   0.5f + 0.5f * cosf(time * 0.0133f + 4.5f),
-                   0.5f + 0.5f * cosf(time * 0.0217f + 3.8f));
-        write4(52, 0.5f + 0.5f * sinf(time * 0.0050f + 2.7f),
-                   0.5f + 0.5f * sinf(time * 0.0085f + 5.3f),
-                   0.5f + 0.5f * sinf(time * 0.0133f + 4.5f),
-                   0.5f + 0.5f * sinf(time * 0.0217f + 3.8f));
+        write4(36, canvasWidth, canvasHeight, 1.0f / canvasWidth, 1.0f / canvasHeight);
+        write4(40, 0.5f + 0.5f * cosf(globalTime * 0.329f + 1.2f),
+                   0.5f + 0.5f * cosf(globalTime * 1.293f + 3.9f),
+                   0.5f + 0.5f * cosf(globalTime * 5.070f + 2.5f),
+                   0.5f + 0.5f * cosf(globalTime * 20.051f + 5.4f));
+        write4(44, 0.5f + 0.5f * sinf(globalTime * 0.329f + 1.2f),
+                   0.5f + 0.5f * sinf(globalTime * 1.293f + 3.9f),
+                   0.5f + 0.5f * sinf(globalTime * 5.070f + 2.5f),
+                   0.5f + 0.5f * sinf(globalTime * 20.051f + 5.4f));
+        write4(48, 0.5f + 0.5f * cosf(globalTime * 0.0050f + 2.7f),
+                   0.5f + 0.5f * cosf(globalTime * 0.0085f + 5.3f),
+                   0.5f + 0.5f * cosf(globalTime * 0.0133f + 4.5f),
+                   0.5f + 0.5f * cosf(globalTime * 0.0217f + 3.8f));
+        write4(52, 0.5f + 0.5f * sinf(globalTime * 0.0050f + 2.7f),
+                   0.5f + 0.5f * sinf(globalTime * 0.0085f + 5.3f),
+                   0.5f + 0.5f * sinf(globalTime * 0.0133f + 4.5f),
+                   0.5f + 0.5f * sinf(globalTime * 0.0217f + 3.8f));
         const float mipX = log2f(safeWidth);
         const float mipY = log2f(safeHeight);
         write4(56, mipX, mipY, (mipX + mipY) * 0.5f, 0.0f);
         write4(60, m_presetShaderBlurMin[1], m_presetShaderBlurMax[1], m_presetShaderBlurMin[2], m_presetShaderBlurMax[2]);
         std::copy_n(m_presetShaderQ, std::size(m_presetShaderQ), constants.data() + 64);
         std::copy_n(m_presetShaderRotMatrices, std::size(m_presetShaderRotMatrices), constants.data() + 96);
+        writeTextureLayerTexsizes();
+        writeBlurTexsizes();
     }
     else
     {
@@ -5650,8 +6458,8 @@ void D3D12Resources::DrawPostProcessFromSrv(D3D12_GPU_DESCRIPTOR_HANDLE srvHandl
     m_commandList->SetGraphicsRootDescriptorTable(0, srvHandle);
     m_commandList->SetGraphicsRootConstantBufferView(1, m_postProcessConstantBuffer->GetGPUVirtualAddress());
     m_commandList->IASetVertexBuffers(0, 1, &m_textureVertexBufferView);
-    m_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
-    m_commandList->DrawInstanced(4, 1, vertexStart, 0);
+    m_commandList->IASetPrimitiveTopology(useCompositeMesh ? D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST : D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+    m_commandList->DrawInstanced(useCompositeMesh ? copiedVertexCount - copiedVertexCount % 3u : 4u, 1, vertexStart, 0);
 }
 
 void D3D12Resources::CreateWaveformResources()
@@ -5738,6 +6546,15 @@ float4 PSMain(PSInput input) : SV_TARGET
     additivePsoDesc.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_ONE;
     ThrowIfFailed(m_d3dDevice->CreateGraphicsPipelineState(&additivePsoDesc, IID_PPV_ARGS(m_waveformAdditivePipelineState.ReleaseAndGetAddressOf())));
 
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pointPsoDesc = psoDesc;
+    pointPsoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT;
+    ThrowIfFailed(m_d3dDevice->CreateGraphicsPipelineState(&pointPsoDesc, IID_PPV_ARGS(m_pointPipelineState.ReleaseAndGetAddressOf())));
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pointAdditivePsoDesc = pointPsoDesc;
+    pointAdditivePsoDesc.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_ONE;
+    pointAdditivePsoDesc.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_ONE;
+    ThrowIfFailed(m_d3dDevice->CreateGraphicsPipelineState(&pointAdditivePsoDesc, IID_PPV_ARGS(m_pointAdditivePipelineState.ReleaseAndGetAddressOf())));
+
     D3D12_GRAPHICS_PIPELINE_STATE_DESC solidPsoDesc = psoDesc;
     solidPsoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
     ThrowIfFailed(m_d3dDevice->CreateGraphicsPipelineState(&solidPsoDesc, IID_PPV_ARGS(m_solidPipelineState.ReleaseAndGetAddressOf())));
@@ -5777,5 +6594,24 @@ float4 PSMain(PSInput input) : SV_TARGET
 
     m_mappedWaveformVertices = m_mappedWaveformVertexBuffers[m_frameIndex];
     m_waveformVertexBufferView = m_waveformVertexBufferViews[m_frameIndex];
+
+    bufferDesc.Width = sizeof(WaveformVertex) * c_maxTextOverlayVertices;
+    for (UINT i = 0; i < m_backBufferCount; ++i)
+    {
+        ThrowIfFailed(m_d3dDevice->CreateCommittedResource(&heapProps,
+                                                           D3D12_HEAP_FLAG_NONE,
+                                                           &bufferDesc,
+                                                           D3D12_RESOURCE_STATE_GENERIC_READ,
+                                                           nullptr,
+                                                           IID_PPV_ARGS(m_textOverlayVertexBuffers[i].ReleaseAndGetAddressOf())));
+        ThrowIfFailed(m_textOverlayVertexBuffers[i]->Map(0, &readRange, reinterpret_cast<void**>(&m_mappedTextOverlayVertexBuffers[i])));
+
+        m_textOverlayVertexBufferViews[i].BufferLocation = m_textOverlayVertexBuffers[i]->GetGPUVirtualAddress();
+        m_textOverlayVertexBufferViews[i].StrideInBytes = sizeof(WaveformVertex);
+        m_textOverlayVertexBufferViews[i].SizeInBytes = sizeof(WaveformVertex) * c_maxTextOverlayVertices;
+    }
+
+    m_mappedTextOverlayVertices = m_mappedTextOverlayVertexBuffers[m_frameIndex];
+    m_textOverlayVertexBufferView = m_textOverlayVertexBufferViews[m_frameIndex];
 }
 } // namespace DX

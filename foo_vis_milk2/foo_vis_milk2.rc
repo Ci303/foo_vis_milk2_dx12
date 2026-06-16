@@ -73,13 +73,13 @@ END
 //    CTEXT           "(""About"" text will be placed in this box automatically at runtime)",IDC_SZ_ABOUT,162,268,223,19,SS_SUNKEN
 //END
 
-IDD_PREFS DIALOGEX 0, 0, 332, 306
+IDD_PREFS DIALOGEX 0, 0, 348, 306
 STYLE DS_SETFONT | WS_CHILD
 FONT 8, "Segoe UI", 400, 0, 0x1
 BEGIN
-    CONTROL         "Start MilkDrop with preset lock [Scroll Lock key] on",IDC_CB_SCROLLON3,
+    CONTROL         "Start with preset lock on",IDC_CB_SCROLLON3,
                     "Button",BS_AUTOCHECKBOX | WS_TABSTOP,2,2,181,10
-    CONTROL         "Disable preset rating (all presets have equal chance)",IDC_CB_NORATING2,
+    CONTROL         "Disable preset rating",IDC_CB_NORATING2,
                     "Button",BS_AUTOCHECKBOX | WS_TABSTOP,2,15,177,10
     CONTROL         "Suppress all errors and warnings",IDC_CB_NOWARN3,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,2,28,164,10
     CONTROL         "Show ""Press F1 for Help"" message at startup",IDC_CB_PRESS_F1_MSG,
@@ -92,65 +92,74 @@ BEGIN
                     "Button",BS_AUTOCHECKBOX | WS_DISABLED | WS_TABSTOP,2,293,173,10
     CONTROL         "Skip composite shader blending",IDC_CB_NOCOMPSHADER,
                     "Button",BS_AUTOCHECKBOX | WS_TABSTOP,2,80,160,10
-    GROUPBOX        "",IDC_STATIC,2,89,165,30
-    RTEXT           "Max. frame rate:",IDC_MAXFPS_CAPTION,14,97,53,10
-    COMBOBOX        IDC_FS_MAXFPS2,69,96,55,107,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
-    CONTROL         "Allow page tearing",IDC_CB_FSPT,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,11,107,94,10
-    GROUPBOX        "Soft Cuts (regular, periodic preset transitions/fades)",IDC_STATIC,2,120,165,70
-    RTEXT           "Time between auto preset changes:",IDC_BETWEEN_TIME_LABEL,11,130,115,10
-    EDITTEXT        IDC_BETWEEN_TIME,128,129,32,13,ES_CENTER | ES_AUTOHSCROLL
-    RTEXT           "Additional random time:",IDC_BETWEEN_TIME_RANDOM_LABEL,11,145,115,10
-    EDITTEXT        IDC_BETWEEN_TIME_RANDOM,128,144,32,13,ES_CENTER | ES_AUTOHSCROLL
-    RTEXT           "Auto preset blend time:",IDC_BLEND_AUTO_LABEL,11,160,115,10
-    EDITTEXT        IDC_BLEND_AUTO,128,159,32,13,ES_CENTER | ES_AUTOHSCROLL
-    RTEXT           "User-solicited preset blend time:",IDC_BLEND_USER_LABEL,11,175,115,10
-    EDITTEXT        IDC_BLEND_USER,128,174,32,13,ES_CENTER | ES_AUTOHSCROLL
-    GROUPBOX        "Hard Cuts (driven by major beats)",IDC_STATIC,2,190,165,51
-    RTEXT           "Average time between hard cuts:",IDC_HARDCUT_BETWEEN_TIME_LABEL,10,199,116,10
-    EDITTEXT        IDC_HARDCUT_BETWEEN_TIME,128,197,32,13,ES_CENTER | ES_AUTOHSCROLL
-    LTEXT           "Loudness threshold:",IDC_HARDCUT_LOUDNESS_LABEL,13,215,70,9
-    CONTROL         "Loudness Slider",IDC_HARDCUT_LOUDNESS,"msctls_trackbar32",TBS_BOTH | TBS_NOTICKS | WS_TABSTOP,84,211,81,16
-    CTEXT           "Min.",IDC_HARDCUT_LOUDNESS_MIN,88,228,14,9
-    CTEXT           "Max.",IDC_HARDCUT_LOUDNESS_MAX,148,228,16,9
-    CONTROL         "Disable hard cuts",IDC_CB_HARDCUTS,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,11,226,72,13
-    LTEXT           "Title display format:",IDC_TITLE_FORMAT_LABEL,183,2,79,10
-    EDITTEXT        IDC_TITLE_FORMAT,182,12,122,13,ES_AUTOHSCROLL
-    LTEXT           "Artwork display format:",IDC_ARTWORK_FORMAT_LABEL,183,28,79,10
-    EDITTEXT        IDC_ARTWORK_FORMAT,182,38,122,13,ES_AUTOHSCROLL
-    GROUPBOX        "Brightness for 16-bit Color Video Modes",IDC_BRIGHT_SLIDER_BOX,168,63,137,58,NOT WS_VISIBLE | WS_DISABLED
+    CONTROL         "Borderless pop-out window",IDC_CB_POPOUT_BORDERLESS,
+                    "Button",BS_AUTOCHECKBOX | WS_TABSTOP,2,93,160,10
+    GROUPBOX        "",IDC_STATIC,2,111,165,36
+    RTEXT           "Max. frame rate:",IDC_MAXFPS_CAPTION,8,121,63,10
+    COMBOBOX        IDC_FS_MAXFPS2,74,120,66,107,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    CONTROL         "Allow page tearing",IDC_CB_FSPT,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,11,135,101,10
+    GROUPBOX        "Soft Cuts (preset transitions/fades)",IDC_STATIC,2,155,165,72
+    RTEXT           "Time between auto preset:",IDC_BETWEEN_TIME_LABEL,11,166,115,10
+    EDITTEXT        IDC_BETWEEN_TIME,128,165,32,13,ES_CENTER | ES_AUTOHSCROLL
+    RTEXT           "Additional random time:",IDC_BETWEEN_TIME_RANDOM_LABEL,11,181,115,10
+    EDITTEXT        IDC_BETWEEN_TIME_RANDOM,128,180,32,13,ES_CENTER | ES_AUTOHSCROLL
+    RTEXT           "Auto preset blend:",IDC_BLEND_AUTO_LABEL,11,196,115,10
+    EDITTEXT        IDC_BLEND_AUTO,128,195,32,13,ES_CENTER | ES_AUTOHSCROLL
+    RTEXT           "User preset blend:",IDC_BLEND_USER_LABEL,11,211,115,10
+    EDITTEXT        IDC_BLEND_USER,128,210,32,13,ES_CENTER | ES_AUTOHSCROLL
+    GROUPBOX        "Hard Cuts (driven by major beats)",IDC_STATIC,2,235,165,58
+    RTEXT           "Time between hard cuts:",IDC_HARDCUT_BETWEEN_TIME_LABEL,10,246,116,10
+    EDITTEXT        IDC_HARDCUT_BETWEEN_TIME,128,244,32,13,ES_CENTER | ES_AUTOHSCROLL
+    LTEXT           "Loudness threshold:",IDC_HARDCUT_LOUDNESS_LABEL,13,264,70,9
+    CONTROL         "Loudness Slider",IDC_HARDCUT_LOUDNESS,"msctls_trackbar32",TBS_BOTH | TBS_NOTICKS | WS_TABSTOP,84,260,81,16
+    CTEXT           "Min.",IDC_HARDCUT_LOUDNESS_MIN,88,277,14,9
+    CTEXT           "Max.",IDC_HARDCUT_LOUDNESS_MAX,148,277,16,9
+    CONTROL         "Disable hard cuts",IDC_CB_HARDCUTS,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,11,280,72,13
+    LTEXT           "Title display format:",IDC_TITLE_FORMAT_LABEL,183,4,110,10
+    EDITTEXT        IDC_TITLE_FORMAT,182,15,138,13,ES_AUTOHSCROLL
+    LTEXT           "Artwork display format:",IDC_ARTWORK_FORMAT_LABEL,183,32,110,10
+    EDITTEXT        IDC_ARTWORK_FORMAT,182,43,138,13,ES_AUTOHSCROLL
+    PUSHBUTTON      "Format &Info...",IDC_FORMAT_INFO,203,64,82,15
+    GROUPBOX        "Brightness for 16-bit Color Video Modes",IDC_BRIGHT_SLIDER_BOX,168,63,153,58,NOT WS_VISIBLE | WS_DISABLED
     CONTROL         "Brightness Slider",IDC_BRIGHT_SLIDER2,"msctls_trackbar32",NOT WS_VISIBLE | WS_DISABLED | WS_TABSTOP,191,73,92,13
     CTEXT           "0\n(bright)",IDC_GAMMA16_0,187,87,25,16,NOT WS_VISIBLE | WS_DISABLED
     CTEXT           "1",IDC_GAMMA16_1,213,87,8,10,NOT WS_VISIBLE | WS_DISABLED
     CTEXT           "2\n(normal)",IDC_GAMMA16_2,222,87,28,17,NOT WS_VISIBLE | WS_DISABLED
     CTEXT           "3",IDC_GAMMA16_3,251,87,8,10,NOT WS_VISIBLE | WS_DISABLED
     CTEXT           "4\n(dark)",IDC_GAMMA16_4,260,87,30,17,NOT WS_VISIBLE | WS_DISABLED
-    PUSHBUTTON      "Edit &Sprites",ID_SPRITE,195,57,82,15
-    PUSHBUTTON      "Edit Custom &Messages",ID_MSG,195,75,82,15
-    PUSHBUTTON      "Select &Fonts",ID_FONTS,195,93,82,15
+    PUSHBUTTON      "Edit &Sprites",ID_SPRITE,203,82,82,15
+    PUSHBUTTON      "Edit Custom &Messages",ID_MSG,203,100,82,15
+    PUSHBUTTON      "Select &Fonts",ID_FONTS,203,118,82,15
+    PUSHBUTTON      "Edit &Blacklist",ID_BLACKLIST,203,136,82,15
+    PUSHBUTTON      "Open &MilkDrop Dir",IDC_OPEN_MILKDROP_FOLDER,203,154,82,15
+    PUSHBUTTON      "Open &Textures Dir",IDC_OPEN_TEXTURES_FOLDER,203,172,82,15
     CONTROL         "Guess 16-bit color brightness",IDC_CB_AUTOGAMMA2,"Button",BS_AUTOCHECKBOX | WS_DISABLED | WS_TABSTOP,177,108,110,10 //based on the GPU
-    GROUPBOX        "Song Title Animations and Messages",IDC_STATIC,168,121,137,71
-    RTEXT           "Duration of song title animations:",IDC_SONGTITLEANIM_DURATION_LABEL,171,131,103,10
-    EDITTEXT        IDC_SONGTITLEANIM_DURATION,275,130,28,13,ES_CENTER | ES_AUTOHSCROLL
-    RTEXT           "Time between\nrandom song title anims.:",IDC_RAND_TITLE_LABEL,178,143,96,16
-    EDITTEXT        IDC_RAND_TITLE,275,147,28,13,ES_CENTER | ES_AUTOHSCROLL
-    RTEXT           "Time between\nrandom custom messages:",IDC_RAND_MSG_LABEL,178,161,96,16
-    EDITTEXT        IDC_RAND_MSG,275,165,28,13,ES_CENTER | ES_AUTOHSCROLL
+    GROUPBOX        "Song Title Animations and Messages",IDC_STATIC,168,195,153,92
+    RTEXT           "Song title duration:",IDC_SONGTITLEANIM_DURATION_LABEL,171,210,103,10
+    EDITTEXT        IDC_SONGTITLEANIM_DURATION,291,209,28,13,ES_CENTER | ES_AUTOHSCROLL
+    RTEXT           "Time between\nrandom title anims.:",IDC_RAND_TITLE_LABEL,178,225,96,16
+    EDITTEXT        IDC_RAND_TITLE,291,229,28,13,ES_CENTER | ES_AUTOHSCROLL
+    RTEXT           "Time between\ncustom messages:",IDC_RAND_MSG_LABEL,178,243,96,16
+    EDITTEXT        IDC_RAND_MSG,291,247,28,13,ES_CENTER | ES_AUTOHSCROLL
+    CONTROL         "Use separate click prompt font",IDC_CB_SEPARATE_CLICK_PROMPT_FONT,
+                    "Button",BS_AUTOCHECKBOX | WS_TABSTOP,172,264,147,10
     CONTROL         "Show title anims. when song changes",IDC_CB_TITLE_ANIMS,
-                    "Button",BS_AUTOCHECKBOX | BS_MULTILINE | WS_TABSTOP,172,179,131,10
-    GROUPBOX        "Image Cache",IDC_IMAGE_CACHE_BOX,168,192,137,36
-    RTEXT           "Max. number of images:",IDC_MAX_IMAGES_CAPTION2,171,202,78,10
-    COMBOBOX        IDC_MAX_IMAGES2,251,201,52,87,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
-    RTEXT           "Max. video memory:",IDC_MAX_BYTES_CAPTION2,182,215,67,10
-    COMBOBOX        IDC_MAX_BYTES2,251,214,52,87,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
-    GROUPBOX        "",IDC_STATIC,2,262,303,34
-    RTEXT           "Canvas stretch:",IDC_STRETCH_CAPTION2,3,270,51,10
-    COMBOBOX        IDC_STRETCH2,56,269,99,87,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
-    RTEXT           "Mesh size:",IDC_MESHSIZECOMBO_CAPTION,166,270,36,10
-    COMBOBOX        IDC_MESHSIZECOMBO,204,269,99,123,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
-    RTEXT           "Pixel shaders:",IDC_SHADERS_CAPTION2,7,283,47,10,WS_DISABLED
-    COMBOBOX        IDC_SHADERS,56,282,99,87,CBS_DROPDOWNLIST | WS_DISABLED | WS_VSCROLL | WS_TABSTOP
-    RTEXT           "Canvas size:",IDC_TEXSIZECOMBO_CAPTION,163,283,39,10,WS_DISABLED
-    COMBOBOX        IDC_TEXSIZECOMBO,204,282,99,87,CBS_DROPDOWNLIST | WS_DISABLED | WS_VSCROLL | WS_TABSTOP
+                    "Button",BS_AUTOCHECKBOX | BS_MULTILINE | WS_TABSTOP,172,276,147,10
+    GROUPBOX        "Image Cache",IDC_IMAGE_CACHE_BOX,168,295,153,47
+    RTEXT           "Max. number of images:",IDC_MAX_IMAGES_CAPTION2,171,308,78,10
+    COMBOBOX        IDC_MAX_IMAGES2,267,307,52,87,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    RTEXT           "Max. video memory:",IDC_MAX_BYTES_CAPTION2,182,325,67,10
+    COMBOBOX        IDC_MAX_BYTES2,267,324,52,87,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    GROUPBOX        "Rendering",IDC_STATIC,2,301,165,54
+    RTEXT           "Canvas stretch:",IDC_STRETCH_CAPTION2,8,315,51,10
+    COMBOBOX        IDC_STRETCH2,62,314,99,87,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    RTEXT           "Mesh size:",IDC_MESHSIZECOMBO_CAPTION,23,333,36,10
+    COMBOBOX        IDC_MESHSIZECOMBO,62,332,99,123,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    RTEXT           "Pixel shaders:",IDC_SHADERS_CAPTION2,7,356,47,10,WS_DISABLED
+    COMBOBOX        IDC_SHADERS,56,355,99,87,CBS_DROPDOWNLIST | WS_DISABLED | WS_VSCROLL | WS_TABSTOP
+    RTEXT           "Canvas size:",IDC_TEXSIZECOMBO_CAPTION,163,356,39,10,WS_DISABLED
+    COMBOBOX        IDC_TEXSIZECOMBO,204,355,99,87,CBS_DROPDOWNLIST | WS_DISABLED | WS_VSCROLL | WS_TABSTOP
+    CONTROL         "",IDC_PREFS_SCROLLBAR,"ScrollBar",SBS_VERT | WS_VISIBLE | WS_TABSTOP,338,0,8,306
 END
 
 //IDD_PROPPAGE_1 DIALOGEX 0, 0, 320, 240
@@ -378,6 +387,56 @@ BEGIN
     CTEXT           "Note: 'AA' stands for anti-aliasing (smoothing); not always available.",IDC_FONT_TEXT,7,160,235,8,SS_CENTERIMAGE | WS_DISABLED
     DEFPUSHBUTTON   "OK",IDOK,246,158,50,13
     PUSHBUTTON      "Cancel",IDCANCEL,300,158,50,13
+END
+
+IDD_FORMAT_INFO DIALOGEX 0, 0, 306, 286
+STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Format Info"
+FONT 8, "Segoe UI", 400, 0, 0x1
+BEGIN
+    LTEXT           "Title display format:",IDC_TITLE_FORMAT_LABEL,7,7,292,10
+    CONTROL         "Uses foobar2000 title formatting. Type $crlf() literally to insert a line break.",IDC_FORMAT_INFO_TITLE_TEXT,
+                    "Edit",ES_MULTILINE | ES_READONLY | ES_NOHIDESEL | WS_TABSTOP,7,20,292,18
+    LTEXT           "Examples:",IDC_FORMAT_INFO_EXAMPLES_LABEL,7,44,292,10
+    CONTROL         "[%artist%$crlf()]%title%",IDC_FORMAT_INFO_EXAMPLES_TEXT,
+                    "Edit",ES_AUTOHSCROLL | ES_READONLY | ES_NOHIDESEL | WS_TABSTOP,7,57,292,13
+    CONTROL         "[%artist%$crlf()][%album%$crlf()]%title%",IDC_FORMAT_INFO_EXAMPLE_2_TEXT,
+                    "Edit",ES_AUTOHSCROLL | ES_READONLY | ES_NOHIDESEL | WS_TABSTOP,7,73,292,13
+    PUSHBUTTON      "Load 1",IDC_FORMAT_INFO_LOAD_EXAMPLE_1,193,89,50,14
+    PUSHBUTTON      "Load 2",IDC_FORMAT_INFO_LOAD_EXAMPLE_2,249,89,50,14
+    LTEXT           "Common fields:",IDC_FORMAT_INFO_COMMON_LABEL,7,107,292,10
+    CONTROL         "%artist% - track artist\r\n%title% - track title\r\n%album% - album title\r\n%album artist% - album artist",IDC_FORMAT_INFO_COMMON_TEXT,
+                    "Edit",ES_MULTILINE | ES_READONLY | ES_NOHIDESEL | WS_TABSTOP,7,120,292,38
+    COMBOBOX        IDC_FORMAT_INFO_FIELD_COMBO,7,162,180,120,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    PUSHBUTTON      "Add",IDC_FORMAT_INFO_ADD_FIELD,193,162,50,14
+    PUSHBUTTON      "Newline",IDC_FORMAT_INFO_ADD_CRLF,249,162,50,14
+    LTEXT           "Artwork display format:",IDC_ARTWORK_FORMAT_LABEL,7,184,292,10
+    CONTROL         "Leave blank to use foobar2000 album art. To override it, enter a full image path, or a title-formatting script that returns an image path.",IDC_FORMAT_INFO_ARTWORK_TEXT,
+                    "Edit",ES_MULTILINE | ES_READONLY | ES_NOHIDESEL | WS_TABSTOP,7,197,292,26
+    LTEXT           "Builder:",IDC_STATIC,7,226,292,10
+    EDITTEXT        IDC_FORMAT_INFO_BUILDER_TEXT,7,239,292,22,ES_MULTILINE | ES_AUTOVSCROLL | WS_TABSTOP
+    PUSHBUTTON      "Clear",IDC_FORMAT_INFO_CLEAR_BUILDER,7,266,50,14
+    PUSHBUTTON      "Copy",IDC_FORMAT_INFO_COPY_BUILDER,63,266,50,14
+    PUSHBUTTON      "Use Title",IDC_FORMAT_INFO_USE_TITLE,157,266,68,14
+    PUSHBUTTON      "Use Artwork",IDC_FORMAT_INFO_USE_ARTWORK,231,266,68,14
+END
+
+IDD_PRESET_BLACKLIST DIALOGEX 0, 0, 248, 172
+STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Preset Blacklist"
+FONT 8, "Segoe UI", 400, 0, 0x1
+BEGIN
+    LTEXT           "Blacklisted preset filenames:",IDC_BLACKLIST_LABEL,7,7,106,10
+    LISTBOX         IDC_BLACKLIST_LIST,7,18,154,113,LBS_NOINTEGRALHEIGHT | LBS_NOTIFY | LBS_EXTENDEDSEL | WS_VSCROLL | WS_TABSTOP
+    EDITTEXT        IDC_BLACKLIST_ENTRY,7,138,154,13,ES_AUTOHSCROLL
+    PUSHBUTTON      "&Add",IDC_BLACKLIST_ADD,169,18,72,15
+    PUSHBUTTON      "&Remove",IDC_BLACKLIST_REMOVE,169,37,72,15
+    PUSHBUTTON      "&Open File",IDC_BLACKLIST_OPEN,169,56,72,15
+    PUSHBUTTON      "Open Presets &Folder",IDC_BLACKLIST_PRESET_DIR,169,75,72,15
+    PUSHBUTTON      "&Import...",IDC_BLACKLIST_IMPORT,169,94,72,15
+    PUSHBUTTON      "E&xport...",IDC_BLACKLIST_EXPORT,169,113,72,15
+    DEFPUSHBUTTON   "OK",IDOK,136,152,50,14
+    PUSHBUTTON      "Cancel",IDCANCEL,191,152,50,14
 END
 
 //IDD_DESKTOPMODE DIALOGEX 0, 0, 201, 105
@@ -892,12 +951,12 @@ END
 
 STRINGTABLE
 BEGIN
-    IDS_SPRITE              "Click this button to edit 'milk_img.ini', the file that defines all of the custom sprites MilkDrop can invoke. A sprite is an image that can fade in or our, move around, and so on."
-    IDS_MSG                 "Click this button to edit 'milk_msg.ini', the file that configures custom overlaid text messages that can display while MilkDrop is running."
+    IDS_SPRITE              "Click this button to edit 'milk2_img.ini', the file that defines custom sprites MilkDrop can invoke. If the file does not exist yet, MilkDrop will create a starter template."
+    IDS_MSG                 "Click this button to edit 'milk2_msg.ini', the file that defines custom overlay messages. If the file does not exist yet, MilkDrop will create a starter template."
     IDS_SONGTITLEANIM_DURATION_HELP 
                             "The duration, in seconds, of song title animations."
     IDS_RAND_TITLE_HELP     "The mean (average) time, in seconds, between randomly-launched song title animations. Set to a negative value to disable random launching."
-    IDS_RAND_MSG_HELP       "The mean (average) time, in seconds, between randomly-launched custom messages (from 'milk_msg.ini'). Set to a negative value to disable random launching."
+    IDS_RAND_MSG_HELP       "The mean (average) time, in seconds, between randomly-launched custom messages (from 'milk2_msg.ini'). Set to a negative value to disable random launching."
     IDS_TITLE_ANIMS_HELP    "Check this box to automatically launch song title animations whenever the track changes."
     IDS_BETWEEN_TIME_HELP   "The minimum amount of time that elapses between preset changes (excluding hard cuts, which take priority). The old preset will begin to blend or fade into a new preset after this amount of time, plus some random amount of time." //(as specified below in the 'additional random time' box). Add these two values together to get the maximum amount of time that will elapse between preset changes."
     IDS_BETWEEN_TIME_RANDOM_HELP 

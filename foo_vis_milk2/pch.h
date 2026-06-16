@@ -47,6 +47,8 @@
 #include <atomic>
 #include <filesystem>
 #include <map>
+#include <mutex>
+#include <string>
 #include <vector>
 
 #ifdef _MSC_VER
@@ -106,7 +108,7 @@
 
 #define MAX_PROPERTY_PAGES 8
 #define MAX_DISPLAY_ADAPTERS 16
-#define MAX_MAX_FPS 144
+#define MAX_MAX_FPS 240
 #define MAX_DISPLAY_MODES 1024
 
 #define WM_MILK2 (WM_USER + 0)
@@ -114,6 +116,8 @@
 #define WM_MILK2_RENDER (WM_USER + 2)
 #define WM_MILK2_RESTORE_WINDOWED (WM_USER + 3)
 #define WM_MILK2_REPAIR_WINDOWED_DX12 (WM_USER + 4)
+#define MILK2_WPARAM_REFRESH_PRESET_LIST 0x1001
+#define MILK2_WPARAM_RANDOM_PRESET 0x1002
 
 #ifdef _DEBUG
 #define MILK2_CONSOLE_LOG(...) FB2K_console_print(core_api::get_my_file_name(), ": ", __VA_ARGS__);

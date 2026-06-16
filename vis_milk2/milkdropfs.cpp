@@ -777,6 +777,14 @@ void CPlugin::RenderFrame(int bRedraw)
         m_fNextPresetTime += fDeltaT;
     }
 
+#ifdef _FOOBAR
+    if (!m_bPlaybackActive)
+    {
+        m_fPresetStartTime += fDeltaT;
+        m_fNextPresetTime += fDeltaT;
+    }
+#endif
+
     // Update FPS.
     /*
     if (GetFrame() < 4)
@@ -836,8 +844,26 @@ void CPlugin::RenderFrame(int bRedraw)
     {
         m_rand_frame = XMFLOAT4(FRAND, FRAND, FRAND, FRAND);
 
+#ifdef _FOOBAR
+        if (!m_bPlaybackActive && m_bLoadFoobarIdlePreset && m_nLoadingPreset == 0)
+        {
+            LoadFoobarIdlePreset(0.0f);
+            m_bLoadFoobarIdlePreset = false;
+        }
+
+        if (m_bPlaybackActive && m_bLoadPresetOnPlaybackResume && m_nLoadingPreset == 0)
+        {
+            LoadRandomPreset(m_fBlendTimeAuto);
+            m_bLoadPresetOnPlaybackResume = false;
+            m_bFoobarIdlePresetActive = false;
+        }
+        const bool allowPresetChange = m_bPlaybackActive;
+#else
+        const bool allowPresetChange = true;
+#endif
+
         // Randomly change the preset, if it's time.
-        if (m_fNextPresetTime < GetTime())
+        if (allowPresetChange && m_fNextPresetTime < GetTime())
         {
             if (m_nLoadingPreset == 0) // don't start a load if one is already underway!
                 LoadRandomPreset(m_fBlendTimeAuto);
@@ -3709,7 +3735,7 @@ void CPlugin::ApplyShaderParams(CShaderParams* p, CConstantTable* pCT, CState* p
     float time = GetTime() - m_fStartTime;
     float progress = (GetTime() - m_fPresetStartTime) / (m_fNextPresetTime - m_fPresetStartTime);
     float mip_x = logf((float)GetWidth()) / logf(2.0f);
-    float mip_y = logf((float)GetWidth()) / logf(2.0f);
+    float mip_y = logf((float)GetHeight()) / logf(2.0f);
     float mip_avg = 0.5f * (mip_x + mip_y);
     float aspect_x = 1;
     float aspect_y = 1;
@@ -3729,8 +3755,8 @@ void CPlugin::ApplyShaderParams(CShaderParams* p, CConstantTable* pCT, CState* p
     if (h[0]) { XMFLOAT4 v4(aspect_x, aspect_y, 1.0f / aspect_x, 1.0f / aspect_y); pCT->SetVector(h[0], &v4); }
     if (h[1]) { XMFLOAT4 v4(0, 0, 0, 0); pCT->SetVector(h[1], &v4); }
     if (h[2]) { XMFLOAT4 v4(time_since_preset_start_wrapped, GetFps(), (float)GetFrame(), progress); pCT->SetVector(h[2], &v4); }
-    if (h[3]) { XMFLOAT4 v4(mdsound.imm_rel[0], mdsound.imm_rel[1], mdsound.imm_rel[2], 0.3333f * (mdsound.imm_rel[0], mdsound.imm_rel[1], mdsound.imm_rel[2])); pCT->SetVector(h[3], &v4); }
-    if (h[4]) { XMFLOAT4 v4(mdsound.avg_rel[0], mdsound.avg_rel[1], mdsound.avg_rel[2], 0.3333f * (mdsound.avg_rel[0], mdsound.avg_rel[1], mdsound.avg_rel[2])); pCT->SetVector(h[4], &v4); }
+    if (h[3]) { XMFLOAT4 v4(mdsound.imm_rel[0], mdsound.imm_rel[1], mdsound.imm_rel[2], 0.3333f * (mdsound.imm_rel[0] + mdsound.imm_rel[1] + mdsound.imm_rel[2])); pCT->SetVector(h[3], &v4); }
+    if (h[4]) { XMFLOAT4 v4(mdsound.avg_rel[0], mdsound.avg_rel[1], mdsound.avg_rel[2], 0.3333f * (mdsound.avg_rel[0] + mdsound.avg_rel[1] + mdsound.avg_rel[2])); pCT->SetVector(h[4], &v4); }
     if (h[5]) { XMFLOAT4 v4(blur_max[0] - blur_min[0], blur_min[0], blur_max[1] - blur_min[1], blur_min[1]); pCT->SetVector(h[5], &v4); }
     if (h[6]) { XMFLOAT4 v4(blur_max[2] - blur_min[2], blur_min[2], blur_min[0], blur_max[0]); pCT->SetVector(h[6], &v4); }
     if (h[7]) { XMFLOAT4 v4((float)m_nTexSizeX, (float)m_nTexSizeY, 1.0f / (float)m_nTexSizeX, 1.0f / (float)m_nTexSizeY); pCT->SetVector(h[7], &v4); }

@@ -354,7 +354,15 @@ void CMilkMenu::DrawMenu(D2D1_RECT_F rect, int xR, int yB, int bCalcRect, D2D1_R
         // Find the item.
         CMilkMenuItem* pItem = m_pFirstChildItem;
         for (int i = m_nChildMenus; i < m_nCurSel; i++)
+        {
+            if (!pItem)
+                return;
             pItem = pItem->m_pNext;
+        }
+        if (!pItem)
+        {
+            return;
+        }
         size_t addr = pItem->m_var_offset + reinterpret_cast<size_t>(g_plugin.m_pState);
 
         wchar_t buf[256] = {0};
@@ -421,17 +429,36 @@ void CMilkMenu::UndrawMenus()
 void CMilkMenu::OnWaitStringAccept(wchar_t* szNewString)
 {
     m_bEditingCurSel = false;
+    if (!szNewString)
+    {
+        static wchar_t emptyString[] = L"";
+        szNewString = emptyString;
+    }
 
     // Find the item.
     CMilkMenuItem* pItem = m_pFirstChildItem;
     for (int i = m_nChildMenus; i < m_nCurSel; i++)
+    {
+        if (!pItem)
+            return;
         pItem = pItem->m_pNext;
+    }
+    if (!pItem || pItem->m_type != MENUITEMTYPE_STRING)
+    {
+        return;
+    }
     size_t addr = pItem->m_var_offset + reinterpret_cast<size_t>(g_plugin.m_pState);
 
-    assert(pItem->m_type == MENUITEMTYPE_STRING);
-
     // Apply the edited string.
-    wcscpy_s(reinterpret_cast<wchar_t*>(addr), wcslen(szNewString) + 1, szNewString); // BUG!!
+    size_t targetCapacityChars = (pItem->m_wParam > sizeof(wchar_t)) ? (pItem->m_wParam / sizeof(wchar_t)) : _countof(g_plugin.m_waitstring.szText);
+    if (targetCapacityChars < 1)
+        return;
+    const size_t maxCapacityChars = _countof(g_plugin.m_waitstring.szText);
+    if (targetCapacityChars > maxCapacityChars)
+        targetCapacityChars = maxCapacityChars;
+    const size_t copyLen = std::min(wcsnlen(szNewString, targetCapacityChars - 1), targetCapacityChars - 1);
+    wmemcpy_s(reinterpret_cast<wchar_t*>(addr), targetCapacityChars, szNewString, copyLen);
+    reinterpret_cast<wchar_t*>(addr)[copyLen] = L'\0';
 
     // If user provided a callback function pointer, call it now.
     if (pItem->m_pCallbackFn)
@@ -528,6 +555,10 @@ LRESULT CMilkMenu::HandleKeydown(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
                 {
                     // Find the item.
                     CMilkMenuItem* pItem = GetCurItem();
+                    if (!pItem)
+                    {
+                        return TRUE;
+                    }
                     size_t addr = pItem->m_var_offset + reinterpret_cast<size_t>(g_plugin.m_pState);
                     float fTemp;
                     switch (pItem->m_type) // Begin editing the item.
@@ -616,7 +647,15 @@ LRESULT CMilkMenu::HandleKeydown(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
         // Find the item.
         CMilkMenuItem* pItem = m_pFirstChildItem;
         for (int i = m_nChildMenus; i < m_nCurSel; i++)
+        {
+            if (!pItem)
+                return TRUE;
             pItem = pItem->m_pNext;
+        }
+        if (!pItem)
+        {
+            return TRUE;
+        }
         size_t addr = pItem->m_var_offset + reinterpret_cast<size_t>(g_plugin.m_pState);
 
         switch (wParam)

@@ -148,6 +148,7 @@ typedef struct
     int bIsSongTitle;     // false for custom message, true for song title
     wchar_t szText[256];
     wchar_t nFontFace[128];
+    int nFontIndex;
     int bBold;
     int bItal;
     float fX;
@@ -155,6 +156,7 @@ typedef struct
     float fFontSize;   // [0..100] for custom messages, [0..4] for song titles
     float fGrowth;     // applies to custom messages only
     int nFontSizeUsed; // height in pixels
+    int nTextWidthUsed;
     float fStartTime;
     float fDuration;
     float fFadeTime; // applies to custom messages only; song title fade times are handled specially
@@ -391,6 +393,10 @@ class CPlugin : public CPluginShell
     bool m_bTexSizeWasAutoExact;
     bool m_bPresetLockedByUser;
     bool m_bPresetLockedByCode;
+    bool m_bPlaybackActive;
+    bool m_bLoadPresetOnPlaybackResume;
+    bool m_bLoadFoobarIdlePreset;
+    bool m_bFoobarIdlePresetActive;
     float m_fAnimTime;
     float m_fStartTime;
     float m_fPresetStartTime;
@@ -444,9 +450,15 @@ class CPlugin : public CPluginShell
                              //   Be careful - this can be -1 if the user changed dir. & a new preset hasn't been loaded yet.
     wchar_t m_szCurrentPresetFile[512]; // w/o path.  this is always valid (unless no presets were found)
     PresetList m_presets;
+    std::vector<std::wstring> m_presetBlacklist;
+    bool m_bPresetBlacklistLoaded;
+    mutable SRWLOCK m_presetBlacklistLock = SRWLOCK_INIT;
     void UpdatePresetList(bool bBackground = false, bool bForce = false, bool bTryReselectCurrentPreset = true) const;
     wchar_t m_szUpdatePresetMask[MAX_PATH];
     volatile bool m_bPresetListReady;
+    volatile int m_nPresetScanCount;
+    int m_nLastPresetScanCount;
+    float m_fShowPresetScanCompleteUntilThisTime;
     //void UpdatePresetRatings();
     //int m_nRatingReadProgress;  // equals 'm_nPresets' if all ratings are read in & ready to go; -1 if uninitialized; otherwise, it's still reading them in, and range is: [0 .. m_nPresets-1]
     bool m_bInitialPresetSelected;
@@ -457,7 +469,8 @@ class CPlugin : public CPluginShell
     int m_presetHistoryBackFence;
     int m_presetHistoryFwdFence;
     void PrevPreset(float fBlendTime);
-    void NextPreset(float fBlendTime); // if not retracing our former steps, it will choose a random one.
+    void NextPreset(float fBlendTime);
+    void LoadAdjacentPreset(float fBlendTime, int direction);
     void OnFinishedLoadingPreset();
 
     FFT mdfft{NUM_AUDIO_BUFFER_SAMPLES, NUM_FFT_SAMPLES, true, 1.0f};
@@ -477,11 +490,12 @@ class CPlugin : public CPluginShell
     //bool m_bUserMessageIsError;
 
     ErrorMsgList m_errors;
-    void AddError(wchar_t* szMsg, float fDuration, ErrorCategory category = ERR_ALL, bool bBold = true);
+    void AddError(const wchar_t* szMsg, float fDuration, ErrorCategory category = ERR_ALL, bool bBold = true);
     void ClearErrors(int category = ERR_ALL);
 
     wchar_t m_szSongTitle[256];
     wchar_t m_szSongTitlePrev[256];
+    float m_fSuppressSongTitleAnimUntilThisTime;
 
     // Stuff for the menu system.
     CMilkMenu* m_pCurMenu; // should always be valid!
@@ -519,6 +533,8 @@ class CPlugin : public CPluginShell
     td_vertinfo* m_vertinfo;
     int* m_indices_strip;
     int* m_indices_list;
+    int m_warpMeshGridXAllocated;
+    int m_warpMeshGridYAllocated;
 
     // Final composite grid.
     MDVERTEX m_comp_verts[FCGSX * FCGSY];
@@ -561,6 +577,8 @@ class CPlugin : public CPluginShell
     std::wstring m_d3d12PresetShaderStatus;
     std::string m_d3d12PresetWarpShaderKey;
     std::string m_d3d12PresetCompositeShaderKey;
+    std::wstring m_d3d12RandomTexturePresetFile;
+    std::map<int, std::wstring> m_d3d12RandomTextureRoots;
     std::vector<uint8_t> m_d3d12ResumeFramePixels;
     UINT m_d3d12ResumeFrameWidth = 0;
     UINT m_d3d12ResumeFrameHeight = 0;
@@ -584,6 +602,8 @@ class CPlugin : public CPluginShell
 #else
     bool PanelSettings(plugin_config* settings);
     void SetFoobarFullscreenFrameLimit(uint32_t max_fps) noexcept;
+    void SetFoobarPlaybackActive(bool active) noexcept;
+    void LoadFoobarIdlePreset(float fBlendTime) noexcept;
 #endif
     bool IsD3D12Active() const { return IsD3D12Mode(); }
     bool LoadD3D12StartupPresetOverride(float fBlendTime);
@@ -597,6 +617,14 @@ class CPlugin : public CPluginShell
     void FindValidPresetDir();
     wchar_t* GetPresetDir() const { return const_cast<wchar_t*>(m_szPresetDir); };
     td_fontinfo* GetFontInfo() const {return const_cast<td_fontinfo*>(m_fontinfo); };
+    std::wstring GetCurrentPresetFilename() const;
+    std::wstring GetCurrentPresetPath() const;
+    std::wstring GetPresetBlacklistPath() const;
+    std::vector<std::wstring> GetPresetBlacklist() const;
+    bool IsPresetBlacklisted(const std::wstring& presetFilename) const;
+    bool AddPresetToBlacklist(const std::wstring& presetFilename);
+    bool RemovePresetFromBlacklist(const std::wstring& presetFilename);
+    bool SetPresetBlacklist(const std::vector<std::wstring>& presetFilenames);
     void SavePresetAs(wchar_t* szNewFile); // overwrites the file if it was already there.
     void DeletePresetFile(wchar_t* szDelFile);
     void RenamePresetFile(wchar_t* szOldFile, wchar_t* szNewFile);
@@ -607,6 +635,7 @@ class CPlugin : public CPluginShell
     void LaunchCustomMessage(int nMsgNum);
     void ReadCustomMessages();
     void LaunchSongTitleAnim();
+    void LaunchStatusText(const wchar_t* text, float duration = 0.9f, float fadeTime = 0.25f, eFontIndex fontIndex = SONGTITLE_FONT);
 
     bool RenderStringToTitleTexture();
     void ShowSongTitleAnim(int w, int h, float fProgress);
@@ -631,6 +660,7 @@ class CPlugin : public CPluginShell
     void KillSprite(int iSlot);
     void DoCustomSoundAnalysis();
     void DrawMotionVectors();
+    bool EnsureMilkDropWarpMesh();
 
     bool LoadShaders(PShaderSet* sh, CState* pState, bool bTick);
     bool CompileD3D12PresetShaderProbe(const char* shaderText, int shaderType, std::string* errors);
@@ -643,6 +673,9 @@ class CPlugin : public CPluginShell
     void RestoreShaderParams();
     bool AddNoiseTex(const wchar_t* szTexName, int size, int zoom_factor);
     bool AddNoiseVol(const wchar_t* szTexName, int size, int zoom_factor);
+    bool LoadPresetBlacklist();
+    bool SavePresetBlacklist() const;
+    static std::wstring NormalizePresetBlacklistEntry(const std::wstring& presetFilename);
 
     //====[ 3. Virtual functions ]===========================================================================
     virtual void OverrideDefaults();
@@ -714,5 +747,7 @@ class CPlugin : public CPluginShell
     TextElement m_loadPresetItem[MAX_PRESETS_PER_PAGE];
     TextElement m_ddsTitle;
 };
+
+extern CPlugin g_plugin;
 
 #endif
