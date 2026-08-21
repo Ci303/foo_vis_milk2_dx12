@@ -18,7 +18,7 @@ on:
 jobs:
   build:
     name: Build and test library
-    runs-on: windows-latest
+    runs-on: windows-2025-vs2026
     continue-on-error: ${{ (matrix.platform == 'ARM64') || (matrix.platform == 'ARM64EC') }}
     strategy:
       matrix:
@@ -29,13 +29,13 @@ jobs:
       SDK_SHA256: 4e2051430dce273029e3e349ec3fbd2bbe222f388b21541762f06a3abcf15990
     steps:
       - name: Clone foo_vis_milk2 repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
       - name: Add MSBuild to PATH
-        uses: microsoft/setup-msbuild@v2
+        uses: microsoft/setup-msbuild@v3
         with:
           msbuild-architecture: ${{ matrix.platform }}
       - name: Cache foobar2000 SDK
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         id: sdk
         with:
           path: |
@@ -64,20 +64,30 @@ jobs:
           git.exe add foobar2000\ libppui\ pfc\
           git.exe commit -m 'Initial commit'
           git.exe apply --ignore-whitespace --whitespace=nowarn --verbose "$(Get-Location)\fb2ksdk.patch"
+          Get-ChildItem -Path "$(Get-Location)\foobar2000", "$(Get-Location)\libppui", "$(Get-Location)\pfc" -Recurse -Filter *.vcxproj | ForEach-Object {
+            (Get-Content -LiteralPath $_.FullName -Raw) `
+              -replace '<PlatformToolset>v14[23]</PlatformToolset>', '<PlatformToolset>v145</PlatformToolset>' |
+              Set-Content -LiteralPath $_.FullName -NoNewline
+          }
           Remove-Item -Path "$(Get-Location)\.git" -Recurse -Force
       - name: Clone projectm-eval repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: projectM-visualizer/projectm-eval
           path: external/projectm-eval
           # Keep the upstream source aligned with external/pmeel.patch.
-          ref: 1a137865b80ac01c44132069667a76dc5a456290
+          ref: 22fb0cfd8f2dfbcd2b68f2443e7f44e19b32c09a
       - name: Patch projectm-eval repository
         run: |
           Set-Location -Path "$(Get-Location)\external\projectm-eval"
           git.exe apply --ignore-whitespace --whitespace=nowarn --verbose "$(Get-Location)\..\pmeel.patch"
+          Get-ChildItem -Path "$(Get-Location)" -Recurse -Filter *.vcxproj | ForEach-Object {
+            (Get-Content -LiteralPath $_.FullName -Raw) `
+              -replace '<PlatformToolset>v14[23]</PlatformToolset>', '<PlatformToolset>v145</PlatformToolset>' |
+              Set-Content -LiteralPath $_.FullName -NoNewline
+          }
       - name: Cache NuGet packages (DirectXTK and WTL)
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         id: nuget
         with:
           path: |
