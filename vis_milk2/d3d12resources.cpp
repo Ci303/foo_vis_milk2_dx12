@@ -5292,7 +5292,12 @@ bool D3D12Resources::CaptureCurrentFrame(std::vector<uint8_t>* pixels, UINT* wid
     UINT numRows = 0;
     UINT64 rowSize = 0;
     m_d3dDevice->GetCopyableFootprints(&sourceDesc, 0, 1, 0, &layout, &numRows, &rowSize, &readbackSize);
-    if (readbackSize == 0 || numRows == 0 || rowSize == 0)
+    if (readbackSize == 0 || numRows == 0 || rowSize == 0 ||
+        sourceDesc.Width > std::numeric_limits<UINT>::max() ||
+        sourceDesc.Height > std::numeric_limits<UINT>::max() ||
+        rowSize > std::numeric_limits<UINT>::max() ||
+        layout.Offset > readbackSize ||
+        readbackSize > static_cast<UINT64>(std::numeric_limits<SIZE_T>::max()))
     {
         return false;
     }
@@ -5354,15 +5359,20 @@ bool D3D12Resources::CaptureCurrentFrame(std::vector<uint8_t>* pixels, UINT* wid
     const UINT capturedWidth = static_cast<UINT>(sourceDesc.Width);
     const UINT capturedHeight = static_cast<UINT>(sourceDesc.Height);
     const UINT sourceRowPitch = static_cast<UINT>(rowSize);
+    if (sourceRowPitch > std::numeric_limits<size_t>::max() / capturedHeight)
+    {
+        return false;
+    }
     std::vector<uint8_t> captured(static_cast<size_t>(capturedHeight) * sourceRowPitch);
 
     const uint8_t* mapped = nullptr;
-    D3D12_RANGE readRange{layout.Offset, layout.Offset + readbackSize};
+    const SIZE_T readOffset = static_cast<SIZE_T>(layout.Offset);
+    D3D12_RANGE readRange{readOffset, static_cast<SIZE_T>(readbackSize)};
     ThrowIfFailed(readbackBuffer->Map(0, &readRange, reinterpret_cast<void**>(const_cast<uint8_t**>(&mapped))));
     for (UINT row = 0; row < capturedHeight; ++row)
     {
         memcpy(captured.data() + static_cast<size_t>(row) * sourceRowPitch,
-               mapped + layout.Offset + static_cast<size_t>(row) * layout.Footprint.RowPitch,
+               mapped + readOffset + static_cast<size_t>(row) * layout.Footprint.RowPitch,
                sourceRowPitch);
     }
     D3D12_RANGE writtenRange{0, 0};

@@ -18,7 +18,7 @@ on:
 jobs:
   build:
     name: Build and test library
-    runs-on: windows-latest
+    runs-on: windows-2025-vs2026
     continue-on-error: ${{ (matrix.platform == 'ARM64') || (matrix.platform == 'ARM64EC') }}
     strategy:
       matrix:
@@ -29,13 +29,13 @@ jobs:
       SDK_SHA256: 4e2051430dce273029e3e349ec3fbd2bbe222f388b21541762f06a3abcf15990
     steps:
       - name: Clone foo_vis_milk2 repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Add MSBuild to PATH
-        uses: microsoft/setup-msbuild@v2
+        uses: microsoft/setup-msbuild@v3
         with:
           msbuild-architecture: ${{ matrix.platform }}
       - name: Cache foobar2000 SDK
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         id: sdk
         with:
           path: |
@@ -64,19 +64,30 @@ jobs:
           git.exe add foobar2000\ libppui\ pfc\
           git.exe commit -m 'Initial commit'
           git.exe apply --ignore-whitespace --whitespace=nowarn --verbose "$(Get-Location)\fb2ksdk.patch"
+          Get-ChildItem -Path "$(Get-Location)\foobar2000", "$(Get-Location)\libppui", "$(Get-Location)\pfc" -Recurse -Filter *.vcxproj | ForEach-Object {
+            (Get-Content -LiteralPath $_.FullName -Raw) `
+              -replace '<PlatformToolset>v14[23]</PlatformToolset>', '<PlatformToolset>v145</PlatformToolset>' |
+              Set-Content -LiteralPath $_.FullName -NoNewline
+          }
           Remove-Item -Path "$(Get-Location)\.git" -Recurse -Force
       - name: Clone projectm-eval repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: projectM-visualizer/projectm-eval
           path: external/projectm-eval
-          ref: master
+          # Keep the upstream source aligned with external/pmeel.patch.
+          ref: 22fb0cfd8f2dfbcd2b68f2443e7f44e19b32c09a
       - name: Patch projectm-eval repository
         run: |
           Set-Location -Path "$(Get-Location)\external\projectm-eval"
           git.exe apply --ignore-whitespace --whitespace=nowarn --verbose "$(Get-Location)\..\pmeel.patch"
+          Get-ChildItem -Path "$(Get-Location)" -Recurse -Filter *.vcxproj | ForEach-Object {
+            (Get-Content -LiteralPath $_.FullName -Raw) `
+              -replace '<PlatformToolset>v14[23]</PlatformToolset>', '<PlatformToolset>v145</PlatformToolset>' |
+              Set-Content -LiteralPath $_.FullName -NoNewline
+          }
       - name: Cache NuGet packages (DirectXTK and WTL)
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         id: nuget
         with:
           path: |
@@ -112,16 +123,19 @@ jobs:
           (Get-ItemProperty ('${{ github.workspace }}\Bin\' + ('${{ matrix.platform }}').Replace('x86', 'Win32') + '\${{ matrix.configuration }}\foo_vis_milk2.dll')).VersionInfo.FileVersion
           Write-Host -NoNewline 'Product Version: '
           (Get-ItemProperty ('${{ github.workspace }}\Bin\' + ('${{ matrix.platform }}').Replace('x86', 'Win32') + '\${{ matrix.configuration }}\foo_vis_milk2.dll')).VersionInfo.ProductVersion
-          $vcversion=(Get-ChildItem "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Tools\MSVC\" | Where-Object { $_.PSIsContainer } | Sort-Object -Property Name -Descending | Select-Object -First 1).Name
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $vcversion = (Get-ChildItem (Join-Path $vsPath 'VC\Tools\MSVC') -Directory | Sort-Object -Property Name -Descending | Select-Object -First 1).Name
           $toolhost=('${{ matrix.platform }}' -ireplace 'ARM64(?:EC)?', 'X86').ToUpper()
           $tooltarget=('${{ matrix.platform }}' -ireplace 'ARM64EC', 'arm64').ToLower()
-          &"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Tools\MSVC\${vcversion}\bin\Host${toolhost}\${tooltarget}\link.exe" /dump /exports /nologo ('${{ github.workspace }}\Bin\' + ('${{ matrix.platform }}').Replace('x86', 'Win32') + '\${{ matrix.configuration }}\foo_vis_milk2.dll')
+          $linker = Join-Path $vsPath "VC\Tools\MSVC\${vcversion}\bin\Host${toolhost}\${tooltarget}\link.exe"
+          & $linker /dump /exports /nologo ('${{ github.workspace }}\Bin\' + ('${{ matrix.platform }}').Replace('x86', 'Win32') + '\${{ matrix.configuration }}\foo_vis_milk2.dll')
       - name: Test x64 foobar2000 MilkDrop 2 Visualization Component
         if: ${{ matrix.platform == 'x64' }}
         run: .\tools\Test-Native.ps1 -Configuration ${{ matrix.configuration }} -Platform x64 -SkipSolutionBuild
       - name: Upload ${{ matrix.platform }} foobar2000 MilkDrop 2 Visualization Component for ${{ matrix.configuration }}
         if: ${{ (matrix.configuration == 'Release') }} #&& ((matrix.platform == 'x86') || (matrix.platform == 'x64')) }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: milk2-${{ matrix.platform }}-${{ matrix.configuration }}
           path: |
@@ -133,31 +147,31 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Clone foo_vis_milk2 repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Download x86 DLL
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: milk2-x86-Release
           path: ${{ github.workspace }}\Bin\Win32\Release
       - name: Download x64 DLL
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: milk2-x64-Release
           path: ${{ github.workspace }}\Bin\x64\Release
       - name: Download ARM64 DLL
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: milk2-ARM64-Release
           path: ${{ github.workspace }}\Bin\ARM64\Release
       - name: Download ARM64EC DLL
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: milk2-ARM64EC-Release
           path: ${{ github.workspace }}\Bin\ARM64EC\Release
       - name: Package foobar2000 MilkDrop 2 component
         run: |
           &"${{ github.workspace }}\tools\build-fb2k_component.ps1" -Version ''
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: foo_vis_milk2-component
           path: ${{ github.workspace }}\foo_vis_milk2.fb2k-component
