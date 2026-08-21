@@ -70,7 +70,8 @@ jobs:
         with:
           repository: projectM-visualizer/projectm-eval
           path: external/projectm-eval
-          ref: master
+          # Keep the upstream source aligned with external/pmeel.patch.
+          ref: 1a137865b80ac01c44132069667a76dc5a456290
       - name: Patch projectm-eval repository
         run: |
           Set-Location -Path "$(Get-Location)\external\projectm-eval"
